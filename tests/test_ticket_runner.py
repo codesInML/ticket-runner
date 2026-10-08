@@ -68,6 +68,27 @@ if args[:2] == ['issue', 'list']: print(os.environ['ISSUES'])
 elif args[:2] == ['issue', 'view'] and any('body' in a for a in args):
     print(json.dumps({'title': 'Epic title', 'body': os.environ.get('PARENT_BODY', '')}))
 elif args[:2] == ['issue', 'view']: print('CLOSED')
+elif args[:2] == ['repo', 'view']: print('main')
+elif args[0] == 'pr':
+    store = Path(os.environ['PR_STATE'])
+    prs = json.loads(store.read_text()) if store.exists() else []
+    opt = lambda name: args[args.index(name)+1]
+    if args[1] == 'list':
+        print(json.dumps([{'number': p['number'], 'url': p['url']} for p in prs
+                          if p['head'] == opt('--head') and p['state'] == 'OPEN']))
+    elif args[1] == 'create':
+        n = 300 + len(prs)
+        prs.append({'number': n, 'url': 'https://github.com/acme/engine/pull/%d' % n, 'head': opt('--head'),
+                    'base': opt('--base'), 'title': opt('--title'), 'body': Path(opt('--body-file')).read_text(),
+                    'state': 'OPEN'})
+        print(prs[-1]['url'])
+    elif args[1] == 'edit':
+        next(p for p in prs if p['number'] == int(args[2]))['body'] = Path(opt('--body-file')).read_text()
+    elif args[1] == 'checks':
+        sys.exit(int(os.environ.get('CHECKS_RC', '0')))
+    elif args[1] == 'merge':
+        next(p for p in prs if p['number'] == int(args[2]))['state'] = 'MERGED'
+    store.write_text(json.dumps(prs))
 elif args[:2] == ['api', 'graphql']:
     query=next(a for a in args if a.startswith('query='))
     repo={'nameWithOwner':'acme/engine', 'parent':{'subIssues':none}}
@@ -102,6 +123,10 @@ if 'You are the verifier' in prompt:
     fail = mode in ('verify-fail', 'verify-fail-always') and (mode == 'verify-fail-always' or not Path('fixed.txt').exists())
     done('## RESULTS\\n- ' + ('FAILED' if fail else 'VERIFIED') + ' GET / answered ' + seen +
          '\\n- UNVERIFIABLE needs production data\\n' + ('VERIFY=FAIL' if fail else 'VERIFY=PASS'), 'verify-session')
+if 'You write the launch plan' in prompt:
+    if mode == 'plan-cap' and '--resume' not in args: done('', 'plan-session', 'max_turns', 8)
+    done('## Pre-launch checklist\\n- [x] Tests pass (verify report)\\n## Residual risk\\n- UNVERIFIABLE: needs '
+         'production data\\n## Rollback plan\\n- Revert the merge commit', 'plan-session')
 if 'verify stage failed' in prompt:
     if mode == 'repair-cap' and '--resume' not in args: done('', 'repair-session', 'max_turns', 8)
     if mode == 'repair-protected': commit('AGENTS.md', 'changed by the repair')
@@ -149,17 +174,23 @@ sys.exit(8 if cap else 0)
             (self.skills / name / "SKILL.md").write_text(f"# {name}\nSee ../../references/definition-of-done.md\n")
         (self.root / "references").mkdir()
         (self.root / "references" / "definition-of-done.md").write_text("Done means done.\n")
-        (self.root / ".gitignore").write_text("fake-bin/\n*.log\nskill.md\nskills/\nreferences/\n")
+        (self.root / ".gitignore").write_text("fake-bin/\n*.log\nskill.md\nskills/\nreferences/\nprs.json\n")
         (self.root / "AGENTS.md").write_text("# Agents\n")
         self.git("add", ".gitignore", "AGENTS.md")
         self.git("commit", "-qm", "Test setup")
+        remote = tempfile.TemporaryDirectory()
+        self.addCleanup(remote.cleanup)
+        self.origin = Path(remote.name) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.origin)], check=True)
+        self.git("remote", "add", "origin", str(self.origin))
         self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
                         COMMANDCODE_BIN=str(self.bin / "command-code"), IMPLEMENT_SKILL=str(skill),
                         AGENT_SKILLS_DIR=str(self.skills), PARENT_BODY="## Checkpoint: after #210\n- [ ] Tests pass",
                         CALL_LOG=str(self.root / "gh.log"), AGENT_LOG=str(self.root / "agents.log"),
-                        ROOT=str(self.root))
+                        ROOT=str(self.root), PR_STATE=str(self.root / "prs.json"))
         for name in ('IMPL_MODEL', 'IMPL_EFFORT', 'IMPL_MAX_TURNS', 'FINAL_MODEL', 'FINAL_EFFORT', 'FINAL_MAX_TURNS',
-                     'WORKFLOW', 'TICKET_REVIEW_MODEL', 'TICKET_REVIEW_EFFORT', 'TICKET_REVIEW_MAX_TURNS'):
+                     'WORKFLOW', 'TICKET_REVIEW_MODEL', 'TICKET_REVIEW_EFFORT', 'TICKET_REVIEW_MAX_TURNS',
+                     'VERIFY_MODEL', 'VERIFY_EFFORT', 'VERIFY_MAX_TURNS', 'GATE_CMDS', 'INSTALL_CMD'):
             self.env.pop(name, None)
 
     def fake(self, name, source):
@@ -206,18 +237,33 @@ sys.exit(8 if cap else 0)
     def calls(self):
         return [json.loads(line) for line in (self.root / "agents.log").read_text().splitlines()]
 
+    def kinds(self):
+        return ['verifier' if 'You are the verifier' in self.prompt(c) else
+                'repair' if 'verify stage failed' in self.prompt(c) else
+                'launch plan' if 'You write the launch plan' in self.prompt(c) else
+                'epic review' if 'You are the final reviewer' in self.prompt(c) else
+                'ticket review' if 'You are the ticket reviewer' in self.prompt(c) else 'implement'
+                for c in self.calls()]
+
+    def call(self, kind, index=-1):
+        return [c for c, k in zip(self.calls(), self.kinds()) if k == kind][index]
+
+    def prs(self):
+        return json.loads((self.root / "prs.json").read_text())
+
     def test_default_implements_in_order_then_sonnet_reviews(self):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'launch plan'])
         self.assertEqual(calls[0][calls[0].index('-m')+1], 'deepseek/deepseek-v4.1-flash')
-        self.assertEqual(calls[-1][calls[-1].index('-m')+1], 'claude-sonnet-5-5')
+        self.assertEqual(self.model(self.call('epic review')), 'claude-sonnet-5-5')
+        self.assertEqual(self.model(self.call('launch plan')), 'claude-sonnet-5-5')
         self.assertEqual(calls[0][calls[0].index('--max-turns')+1], '500')
         self.assertEqual(self.state()['210']['status'], 'done')
         self.assertEqual(self.state()['_review']['status'], 'ship')
         self.assertEqual(self.run_script('--resume').returncode, 0)
-        self.assertEqual(len(self.calls()), 4)  # Resume skips implementation.
+        self.assertEqual(len(self.calls()), 5)  # Resume skips implementation.
 
     def check_cap_resume(self, mode):
         failed = self.run_script(mode=mode)
@@ -311,9 +357,8 @@ sys.exit(8 if cap else 0)
         result = self.run_osmani()
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
-        kinds = ['ticket review' if 'You are the ticket reviewer' in self.prompt(c) else
-                 'epic review' if 'You are the final reviewer' in self.prompt(c) else 'implement' for c in calls]
-        self.assertEqual(kinds, ['implement', 'ticket review', 'implement', 'ticket review', 'epic review'])
+        self.assertEqual(self.kinds(), ['implement', 'ticket review', 'implement', 'ticket review', 'epic review',
+                                        'launch plan'])
         # Odd #209 gets the second model (glm), even #210 the first (luna); both review at high.
         self.assertEqual(self.model(calls[1]), 'z-ai/glm-5.3-flash')
         self.assertEqual(self.model(calls[3]), 'gpt-6-luna')
@@ -328,7 +373,7 @@ sys.exit(8 if cap else 0)
         self.assertIn('zombie code', implement)
         self.assertIn('outside\nthe files this ticket changes is DEFERRED', self.prompt(calls[1]))
         self.assertIn('old bug in b.ts:2', (self.root / '.scratch/run-tickets-commandcode/207/209/review/round-1/final.txt').read_text())
-        self.assertIn('209/review/round-1/final.txt', self.prompt(calls[-1]))
+        self.assertIn('209/review/round-1/final.txt', self.prompt(self.call('epic review')))
         state = self.state()
         self.assertEqual(state['_meta']['workflow'], 'osmani')
         self.assertEqual(state['209']['ticketReview']['status'], 'pass')
@@ -439,7 +484,7 @@ sys.exit(8 if cap else 0)
         result = self.run_osmani('--final-only')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.state()['_meta']['workflow'], 'osmani')
-        self.assertIn('Every ticket passed its own ticket review', self.prompt(self.calls()[-1]))
+        self.assertIn('Every ticket passed its own ticket review', self.prompt(self.call('epic review')))
 
 
     # ── project config + generic prompts ─────────────────────────────────
@@ -507,13 +552,6 @@ sys.exit(8 if cap else 0)
     def verify_dir(self):
         return self.root / ".scratch/run-tickets-commandcode/207/verify"
 
-    def kinds(self):
-        return ['verifier' if 'You are the verifier' in self.prompt(c) else
-                'repair' if 'verify stage failed' in self.prompt(c) else
-                'epic review' if 'You are the final reviewer' in self.prompt(c) else
-                'ticket review' if 'You are the ticket reviewer' in self.prompt(c) else 'implement'
-                for c in self.calls()]
-
     def serve(self, **config):
         port = free_port()
         (self.root / "serve.py").write_text(SERVE)
@@ -538,8 +576,8 @@ sys.exit(8 if cap else 0)
         report = (self.verify_dir() / 'report.md').read_text()
         self.assertIn('PASS `echo first`', report)
         self.assertIn('skipped: no `serve`', report)
-        self.assertIn(str(self.verify_dir() / 'report.md'), self.prompt(self.calls()[-1]))
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review'])
+        self.assertIn(str(self.verify_dir() / 'report.md'), self.prompt(self.call('epic review')))
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'launch plan'])
         self.assertFalse((self.root / '.scratch/worktrees/verify').exists())
         self.assertEqual(self.git('branch', '--list', 'cc/207/verify'), '')
 
@@ -547,7 +585,7 @@ sys.exit(8 if cap else 0)
         self.configure(verify=["test -f fixed.txt"], gate=["true"])
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair', 'epic review'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair', 'epic review', 'launch plan'])
         repair = self.calls()[2]
         self.assertIn(str(self.skills / 'debugging-and-error-recovery' / 'SKILL.md'), self.prompt(repair))
         self.assertIn('$ test -f fixed.txt', self.prompt(repair))
@@ -580,7 +618,7 @@ sys.exit(8 if cap else 0)
         subprocess.run(['git', 'commit', '-qm', 'Fix by hand'], cwd=wt, check=True)
         result = self.run_script('--final-only')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair', 'epic review'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair', 'epic review', 'launch plan'])
         self.assertEqual((self.root / 'fixed.txt').read_text(), 'by hand')
 
     def test_verify_repair_touching_a_protected_file_is_not_merged(self):
@@ -594,7 +632,7 @@ sys.exit(8 if cap else 0)
         port = self.serve()
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'verifier', 'epic review'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'verifier', 'epic review', 'launch plan'])
         verifier = self.calls()[2]
         self.assertEqual(self.model(verifier), 'gpt-6-luna')
         self.assertEqual(verifier[verifier.index('--effort')+1], 'high')
@@ -614,7 +652,8 @@ sys.exit(8 if cap else 0)
         self.serve(verify=["echo built"])
         result = self.run_script(mode='verify-fail')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'verifier', 'repair', 'verifier', 'epic review'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'verifier', 'repair', 'verifier', 'epic review',
+                                        'launch plan'])
         self.assertIn('FAILED runtime checks', self.prompt(self.calls()[3]))
         self.assertTrue((self.root / 'fixed.txt').exists())
 
@@ -674,6 +713,119 @@ sys.exit(8 if cap else 0)
         self.assertIn('verify stage failed', self.prompt(resumed))
         self.assertEqual(resumed[resumed.index('--resume')+1], 'repair-session')
         self.assertTrue((self.root / 'fixed.txt').exists())
+
+
+    # ── ship stage ───────────────────────────────────────────────────────
+
+    def remote_head(self, branch='test'):
+        out = subprocess.run(['git', 'ls-remote', '--heads', str(self.origin), branch], capture_output=True, text=True)
+        return out.stdout.split()[0] if out.stdout.strip() else None
+
+    def test_ship_pushes_and_opens_a_ready_pull_request_with_a_runner_written_body(self):
+        self.plan_osmani()
+        self.configure(verify=["echo first"])
+        result = self.run_osmani()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.remote_head(), self.git('rev-parse', 'HEAD'))
+        create = next(c for c in self.gh_calls() if c[:2] == ['pr', 'create'])
+        self.assertNotIn('--draft', create)
+        [pr] = self.prs()
+        self.assertEqual((pr['base'], pr['head'], pr['title']), ('main', 'test', 'Epic title (#207)'))
+        for text in ('## Tickets', '- #209 First slice', '## Verify', '- PASS `echo first`', '## Launch plan',
+                     '## Rollback plan', '## Deferred findings', 'old bug in b.ts:2'):
+            self.assertIn(text, pr['body'])
+        plan = self.prompt(self.call('launch plan'))
+        self.assertIn(str(self.skills / 'shipping-and-launch' / 'SKILL.md'), plan)
+        self.assertIn('definition-of-done.md', plan)
+        self.assertIn(str(self.verify_dir() / 'report.md'), plan)
+        self.assertIn('no deploy section', plan)
+        state = self.state()['_ship']
+        self.assertEqual((state['status'], state['pr'], state['head']), ('pr-open', 300, self.git('rev-parse', 'HEAD')))
+
+    def test_ship_edits_the_open_pull_request_for_a_new_head(self):
+        self.configure(verify=["true"], prBase="develop")
+        self.assertEqual(self.run_script().returncode, 0)
+        self.issues.append({"number": 211, "title": "Third slice", "body": "Parent #207", "state": "OPEN"})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['pr', 'create']]), 1)
+        self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['pr', 'edit']]), 1)
+        [pr] = self.prs()
+        self.assertEqual(pr['base'], 'develop')
+        self.assertIn('#211 Third slice', pr['body'])
+        self.assertEqual(self.remote_head(), self.git('rev-parse', 'HEAD'))
+
+    def test_ship_refuses_to_push_over_foreign_commits(self):
+        self.git("push", "-q", "origin", "test")
+        other = self.origin.parent / "other"
+        subprocess.run(['git', 'clone', '-q', '-b', 'test', str(self.origin), str(other)], check=True)
+        (other / 'foreign.txt').write_text('someone else')
+        for args in (['add', 'foreign.txt'], ['-c', 'user.email=x@y', '-c', 'user.name=X', 'commit', '-qm', 'Foreign'],
+                     ['push', '-q', 'origin', 'test']):
+            subprocess.run(['git', *args], cwd=other, check=True)
+        foreign = self.remote_head()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.state()['_ship']['status'], 'needs-human')
+        self.assertIn('never force-pushes', self.state()['_ship']['reason'])
+        self.assertEqual(self.remote_head(), foreign)
+        self.assertFalse((self.root / 'prs.json').exists())
+
+    def test_merge_refusals(self):
+        result = self.run_script('--merge', '--no-verify')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--merge needs the verify stage', result.stderr)
+        result = self.run_script('--merge')  # Default config: verify has nothing to run.
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.state()['_ship']['status'], 'merge-refused')
+        self.assertIn('verify stage ran nothing', self.state()['_ship']['reason'])
+        self.assertFalse([c for c in self.gh_calls() if c[:2] in (['pr', 'checks'], ['pr', 'merge'])])
+
+    def test_merge_waits_for_green_ci_then_merges_without_deleting_branches(self):
+        self.configure(verify=["true"], mergeMethod="squash")
+        result = self.run_script('--merge')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        head = self.git('rev-parse', 'HEAD')
+        self.assertIn(['pr', 'checks', '300', '--watch'], self.gh_calls())
+        merge = next(c for c in self.gh_calls() if c[:2] == ['pr', 'merge'])
+        self.assertEqual(merge, ['pr', 'merge', '300', '--squash', '--match-head-commit', head])
+        self.assertEqual(self.state()['_ship']['status'], 'merged')
+        self.assertEqual(self.prs()[0]['state'], 'MERGED')
+        self.assertEqual(self.git('branch', '--list', 'test'), '* test')
+
+    def test_red_ci_needs_a_human_and_never_merges(self):
+        self.configure(verify=["true"])
+        self.env["CHECKS_RC"] = "1"
+        result = self.run_script('--merge')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.state()['_ship']['status'], 'needs-human')
+        self.assertIn('CI is red', self.state()['_ship']['reason'])
+        self.assertFalse([c for c in self.gh_calls() if c[:2] == ['pr', 'merge']])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'launch plan'])
+
+    def test_no_ship_stops_after_the_epic_review(self):
+        result = self.run_script('--no-ship')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review'])
+        self.assertIsNone(self.remote_head())
+
+    def test_no_verify_is_named_in_the_launch_plan_and_the_pull_request(self):
+        self.configure(verify=["false"])
+        result = self.run_script('--no-verify')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('_verify', self.state())
+        self.assertIn('verify skipped', self.prompt(self.call('launch plan')))
+        self.assertIn('was skipped for this run', self.prompt(self.call('epic review')))
+        self.assertIn('Verify skipped (--no-verify).', self.prs()[0]['body'])
+
+    def test_interrupted_launch_plan_resumes_its_session(self):
+        self.assertEqual(self.run_script(mode='plan-cap').returncode, 1)
+        self.assertEqual(self.state()['_ship']['status'], 'turn-cap')
+        result = self.run_script('--resume', '--final-only', mode='plan-cap')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        resumed = self.call('launch plan')
+        self.assertEqual(resumed[resumed.index('--resume')+1], 'plan-session')
+        self.assertEqual(self.state()['_ship']['status'], 'pr-open')
 
 
 if __name__ == '__main__':
