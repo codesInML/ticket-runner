@@ -63,7 +63,17 @@ TICKET_REVIEW_SKILLS = ("code-review-and-quality", "security-and-hardening", "pe
                         "api-and-interface-design")
 INTEGRATION_SKILLS = ("git-workflow-and-versioning", "debugging-and-error-recovery")
 EPIC_REVIEW_SKILLS = ("code-review-and-quality", "security-and-hardening", "performance-optimization")
-OSMANI_SKILLS = tuple(dict.fromkeys(IMPLEMENT_SKILLS + TICKET_REVIEW_SKILLS + INTEGRATION_SKILLS + EPIC_REVIEW_SKILLS))
+VERIFY_SKILLS = ("debugging-and-error-recovery",)
+BROWSER_SKILL = "browser-testing-with-devtools"
+# The verifier's chrome-devtools MCP tools, which a headless run withholds unless named.
+BROWSER_SERVER = "chrome-devtools"
+BROWSER_TOOLS = tuple(f"mcp__{BROWSER_SERVER}__{t}" for t in (
+    "list_pages", "new_page", "select_page", "close_page", "navigate_page", "wait_for", "take_snapshot",
+    "take_screenshot", "click", "fill", "fill_form", "hover", "press_key", "handle_dialog", "evaluate_script",
+    "list_console_messages", "get_console_message", "list_network_requests", "get_network_request",
+    "resize_page", "emulate", "performance_start_trace", "performance_stop_trace", "performance_analyze_insight"))
+BROWSER_ADD = (f"command-code mcp add --scope user --transport stdio {BROWSER_SERVER} -- "
+               "npx -y chrome-devtools-mcp@latest --isolated")
 OSMANI_SOURCE = "https://github.com/addyosmani/agent-skills.git"
 RETRYABLE = {"turn-cap", "provider-error", "interrupted", "in-progress", "error"}
 # Optional project config, relative to the project root. Every key is optional; these are the defaults.
@@ -364,10 +374,61 @@ def plan_problems(tickets, parent_body):
     return refusals, warnings
 
 
-def skill_problems(skills_dir):
-    """Osmani skill files the prompts name, and the references they link, that are missing on disk."""
+def stage_skills(a, cfg):
+    """Exactly the skills the stages this run enables will name, in either workflow."""
+    names, osmani, post = [], a.workflow == "osmani", not a.only
+    if osmani and not a.final_only:
+        names += IMPLEMENT_SKILLS + TICKET_REVIEW_SKILLS + INTEGRATION_SKILLS
+    if post and not a.no_verify and (cfg["verify"] or cfg["serve"]):
+        names += VERIFY_SKILLS + ((BROWSER_SKILL,) if cfg["browser"] else ())
+    if post and not a.no_final_review and osmani:
+        names += EPIC_REVIEW_SKILLS
+    return list(dict.fromkeys(names))
+
+
+def read_env(path):
+    """KEY=VALUE pairs of an env file, for the app's process only; values are never printed."""
+    pairs = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, sep, value = line.partition("=")
+        if line.startswith("#") or not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key.strip()):
+            continue
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        pairs[key.strip()] = value
+    return pairs
+
+
+def stage_refusals(a, cfg, root):
+    """Reasons the verify stage could not run as configured, found before any agent starts."""
+    if a.only or a.no_verify or not cfg["serve"]:
+        return []
+    refusals = []
+    env = cfg["serveEnv"]
+    if not env:
+        refusals.append(f"{CONFIG} sets serve but no serveEnv: point it at a local env file for the app "
+                        "(never the developer's .env)")
+    elif not (root / env).is_file():
+        refusals.append(f"serveEnv {env} does not exist; create it, or remove serve from {CONFIG}")
+    elif (root / ".env").exists() and (root / env).resolve() == (root / ".env").resolve():
+        refusals.append("serveEnv must not be the developer's .env; give the app its own env file")
+    if cfg["browser"]:
+        listed = subprocess.run([os.getenv("COMMANDCODE_BIN", "command-code"), "mcp", "list"],
+                                capture_output=True, text=True)
+        if not re.search(rf"(?<![\w-]){BROWSER_SERVER}(?![\w-])", listed.stdout + listed.stderr):
+            refusals.append(f"browser is on but CommandCode has no {BROWSER_SERVER} MCP server; add it with:\n"
+                            f"  {BROWSER_ADD}\nor set \"browser\": false in {CONFIG}")
+    return refusals
+
+
+def skill_problems(skills_dir, names):
+    """Skill files the prompts name, and the references they link, that are missing on disk."""
     missing = []
-    for name in OSMANI_SKILLS:
+    for name in names:
         skill = skills_dir / name / "SKILL.md"
         if not skill.is_file():
             missing.append(str(skill))
@@ -451,6 +512,11 @@ Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (osma
     p.add_argument("--ticket-review-effort", default=os.getenv("TICKET_REVIEW_EFFORT", "high"))
     p.add_argument("--ticket-review-max-turns", type=positive, default=os.getenv("TICKET_REVIEW_MAX_TURNS", "500"))
     p.add_argument("--skip-plan-check", action="store_true", help="run an osmani epic despite plan check refusals")
+    p.add_argument("--verify-model", default=os.getenv("VERIFY_MODEL", "luna"),
+                   help="model of the verify stage's read-only verifier (default luna)")
+    p.add_argument("--verify-effort", default=os.getenv("VERIFY_EFFORT", "high"))
+    p.add_argument("--verify-max-turns", type=positive, default=os.getenv("VERIFY_MAX_TURNS", "500"))
+    p.add_argument("--no-verify", action="store_true", help="skip the verify stage")
     p.add_argument("--final-model", default=os.getenv("FINAL_MODEL", EPIC_REVIEW_MODEL))
     p.add_argument("--final-effort", default=os.getenv("FINAL_EFFORT", "high"))
     p.add_argument("--final-max-turns", type=positive, default=os.getenv("FINAL_MAX_TURNS", "500"))
@@ -468,12 +534,13 @@ Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (osma
         p.error("--final-only cannot be combined with --only or --no-final-review")
     a.model = MODELS.get(a.model, a.model)
     a.final_model = MODELS.get(a.final_model, a.final_model)
+    a.verify_model = MODELS.get(a.verify_model, a.verify_model)
     a.ticket_review_models = [MODELS.get(m, m) for m in a.ticket_review_model.replace(" ", "").split(",") if m]
     if not a.ticket_review_models:
         p.error("--ticket-review-model needs at least one model")
     if a.effort is None:
         a.effort = "xhigh" if a.model == MODELS["muse"] else "max"
-    for model, effort in [(a.model, a.effort), (a.final_model, a.final_effort),
+    for model, effort in [(a.model, a.effort), (a.final_model, a.final_effort), (a.verify_model, a.verify_effort),
                           *((m, a.ticket_review_effort) for m in a.ticket_review_models)]:
         if model in EFFORTS and effort != "none" and effort not in EFFORTS[model]:
             p.error(f"{model} effort must be one of {sorted(EFFORTS[model])}, or none")
@@ -635,16 +702,15 @@ def main():
         say(f"Warning: ticket review shares {a.model} with the implementer, and with it the same blind spots",
             YELLOW, err=True)
     skills_dir = Path(os.getenv("AGENT_SKILLS_DIR", str(Path.home() / ".agents/skills")))
-    refusals = []
+    missing = skill_problems(skills_dir, stage_skills(a, cfg))
+    for item in missing:
+        say(f"Missing skill file: {item}", RED, err=True)
+    refusals = [f"{len(missing)} skill file(s) missing; install the skills from {OSMANI_SOURCE}, and restore "
+                f"their references with:\n  git clone --depth 1 --filter=blob:none --sparse {OSMANI_SOURCE} "
+                f"/tmp/agent-skills && git -C /tmp/agent-skills sparse-checkout set references && "
+                f"cp -R /tmp/agent-skills/references {skills_dir.parent}/"] if missing else []
+    refusals += stage_refusals(a, cfg, root)
     if osmani:
-        missing = skill_problems(skills_dir)
-        for item in missing:
-            say(f"Missing skill file: {item}", RED, err=True)
-        if missing:
-            refusals.append(f"{len(missing)} skill file(s) missing; restore the references with:\n"
-                            f"  git clone --depth 1 --filter=blob:none --sparse {OSMANI_SOURCE} /tmp/agent-skills && "
-                            f"git -C /tmp/agent-skills sparse-checkout set references && "
-                            f"cp -R /tmp/agent-skills/references {skills_dir.parent}/")
         if not a.final_only:
             parent_body = gh_json("issue", "view", str(a.parent), "--json", "body")["body"] or ""
             problems, warnings = plan_problems(tickets, parent_body)
@@ -789,7 +855,7 @@ class Runner:
                         "Commit or stash them, then --resume. No files discarded.")
 
     def run_agent(self, model, effort, turns, prompt, folder, record, session=None, cwd=None,
-                  tag="review", color=BLUE):
+                  tag="review", color=BLUE, extra=()):
         cwd = cwd or self.root
         folder.mkdir(parents=True, exist_ok=True)
         number = record.get("attempts", 0) + 1
@@ -800,6 +866,7 @@ class Runner:
             argv.extend(["--effort", effort])
         if session:
             argv.extend(["--resume", session])
+        argv.extend(extra)
         # Separate stdout NDJSON from stderr, and preserve every attempt's logs.
         events = folder / f"attempt-{number}.jsonl"
         result = None
@@ -863,7 +930,7 @@ class Runner:
         except BaseException:
             self.stop()
             raise
-        return self.review() if outcome is None else outcome
+        return self.stages() if outcome is None else outcome
 
     def preflight(self, selected):
         pending, external = [], {}
@@ -956,8 +1023,8 @@ class Runner:
             return 1
         if self.a.only and (failed or pending or self.parked or self.deferred):
             return 1
-        if self.a.only or self.a.no_final_review:
-            say("Ticket run finished; epic review skipped.", GREEN)
+        if self.a.only:
+            say("Ticket run finished; verify, epic review and ship skipped (--only).", GREEN)
             return 0
         return None
 
@@ -1436,6 +1503,7 @@ or modify the runner or {self.hands_off}.
         return tdir / f"{kind}-{len(list(tdir.glob(f'{kind}-*.log'))) + 1}.log"
 
     def shell(self, cmd, cwd, log):
+        log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("w") as out:
             child = self.spawn_child(cmd, shell=True, cwd=cwd, stdout=out, stderr=subprocess.STDOUT)
             try:
@@ -1454,6 +1522,305 @@ or modify the runner or {self.hands_off}.
             BOLD, GREEN if rc == 0 else RED)
         return rc == 0, log
 
+    # ── post-ticket stages ─────────────────────────────────────────────────
+
+    def stages(self):
+        """Verify, then the epic review, each skipped while its result still holds for the epic head."""
+        if dirty(self.root):
+            raise RuntimeError("The post-ticket stages require a clean main worktree")
+        if not self.a.no_verify:
+            outcome = self.verify()
+            if outcome:
+                return outcome
+        if self.a.no_final_review:
+            say("Epic review skipped (--no-final-review).", GREEN)
+            return 0
+        return self.review()
+
+    def parent_issue(self):
+        if not hasattr(self, "_parent"):
+            self._parent = gh_json("issue", "view", str(self.a.parent), "--json", "title,body")
+        return self._parent
+
+    def epic_fail(self, rec, status, reason):
+        """The epic itself needs a person: stop before the stages that follow."""
+        self.update(rec, status=status, reason=reason)
+        if status == "needs-human":
+            self.label(self.a.parent, "needs-human", "in-progress")
+        say(f"Epic #{self.a.parent} {status}: {reason}", YELLOW, BOLD)
+        return 1
+
+    # ── verify stage ───────────────────────────────────────────────────────
+
+    def verify(self):
+        rec = self.data.setdefault("_verify", {})
+        tip = git(self.root, "rev-parse", self.epic)
+        vdir = self.folder / "verify"
+        if rec.get("status") == "pass" and rec.get("head") == tip:
+            say(f"Verify stage already passed at {tip[:8]}; skipping", DIM)
+            return 0
+        vdir.mkdir(parents=True, exist_ok=True)
+        if not self.cfg["verify"] and not self.cfg["serve"]:
+            self.update(rec, status="pass", head=tip, ran=False, drop=("reason", "phase"))
+            self.verify_report(rec, tip, [], {"status": "skipped", "reason": "no `verify` commands and no "
+                                              f"`serve` in {CONFIG}"})
+            say(f"Verify stage: nothing configured in {CONFIG}; skipping", DIM)
+            return 0
+        say(f"\n━━ Verify stage for #{self.a.parent} at {tip[:8]} ━━", BOLD, BLUE)
+        wt = self.verify_worktree(rec, tip)
+        if wt is None:
+            return 1
+        while True:
+            if rec.get("phase") != "repair":
+                passed = self.verify_pass(rec, wt)
+                if passed is None:
+                    return 1
+                if passed:
+                    break
+                if rec.get("repaired"):
+                    return self.epic_fail(rec, "needs-human", f"verify still fails after one repair; fix it in "
+                                          f"{os.path.relpath(wt)} (commit there), then --final-only. Report: "
+                                          f"{vdir / 'report.md'}")
+                self.update(rec, phase="repair")
+            if not self.verify_repair(rec, wt, vdir):
+                return 1
+            self.update(rec, phase="recheck")
+            log = self.log(vdir, "gate")
+            say(f"verify gate: {self.gate_cmd}", BOLD)
+            if self.shell(self.gate_cmd, wt, log):
+                return self.epic_fail(rec, "needs-human", f"the gate fails after the verify repair; see {log}. "
+                                      f"Fix it in {os.path.relpath(wt)}, then --final-only")
+        return self.verify_merge(rec, wt, tip)
+
+    def verify_branch(self):
+        return f"cc/{self.a.parent}/verify"
+
+    def verify_worktree(self, rec, tip):
+        """The verify worktree at the epic tip; a kept one (after needs-human) is reused with its fixes."""
+        branch, wt = self.verify_branch(), self.worktrees / "verify"
+        if not wt.exists():
+            self.worktrees.mkdir(parents=True, exist_ok=True)
+            if attempt(self.root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").returncode:
+                git(self.root, "worktree", "add", "-q", "-b", branch, str(wt), tip)
+                self.update(rec, drop=("repaired", "phase", "check", "repair", "reason"))
+            else:
+                git(self.root, "worktree", "add", "-q", str(wt), branch)
+        resuming = self.a.resume and rec.get("phase") == "repair" and \
+            rec.get("repair", {}).get("status") in RETRYABLE
+        problem = (f"{os.path.relpath(wt)} is mid-rebase" if rebasing(wt) else
+                   f"{os.path.relpath(wt)} has uncommitted changes" if dirty(wt) and not resuming else
+                   self.check_worktree(wt, branch))
+        if not problem and attempt(wt, "merge-base", "--is-ancestor", tip, "HEAD").returncode:
+            if attempt(wt, "merge-base", "--is-ancestor", "HEAD", tip).returncode:
+                problem = f"{branch} has diverged from {self.epic}; rebase it onto {self.epic} or remove it"
+            else:
+                git(wt, "merge", "-q", "--ff-only", tip)
+        if problem:
+            self.epic_fail(rec, "needs-human", f"{problem}; fix it, then --final-only")
+            return None
+        self.provision(wt)
+        self.update(rec, status="in-progress", head=tip, worktree=str(wt), drop=("reason",))
+        return wt
+
+    def verify_pass(self, rec, wt):
+        """Every verify command, then the runtime checks; True, False, or None when a person must look."""
+        vdir, cmds = self.folder / "verify", self.cfg["verify"]
+        results = []
+        for i, cmd in enumerate(cmds, 1):
+            log = vdir / f"cmd-{i}.log"
+            say(f"verify [{i}/{len(cmds)}]: {cmd}", BOLD)
+            rc = self.shell(cmd, wt, log)
+            say(f"verify [{i}/{len(cmds)}] {'passed' if rc == 0 else f'failed (exit {rc})'} ({os.path.relpath(log)})",
+                BOLD, GREEN if rc == 0 else RED)
+            results.append({"cmd": cmd, "rc": rc, "log": str(log)})
+        if any(r["rc"] for r in results):
+            runtime = {"status": "not-run", "reason": "verify commands failed"} if self.cfg["serve"] else \
+                {"status": "skipped", "reason": f"no `serve` in {CONFIG}"}
+        elif self.cfg["serve"]:
+            runtime = self.runtime_checks(rec, wt, vdir)
+        else:
+            runtime = {"status": "skipped", "reason": f"no `serve` in {CONFIG}"}
+        head = git(wt, "rev-parse", "HEAD")
+        self.update(rec, commands=results, runtime={k: v for k, v in runtime.items() if k != "text"})
+        self.verify_report(rec, head, results, runtime)
+        if runtime["status"] == "stuck":
+            self.epic_fail(rec, runtime.get("agent", "needs-human"), runtime["reason"])
+            return None
+        passed = not any(r["rc"] for r in results) and runtime["status"] in ("pass", "skipped")
+        say(f"Verify {'passed' if passed else 'failed'}. Report: {os.path.relpath(vdir / 'report.md')}",
+            GREEN if passed else RED, BOLD)
+        return passed
+
+    def runtime_checks(self, rec, wt, vdir):
+        cfg = self.cfg
+        env = dict(os.environ, **read_env(self.root / cfg["serveEnv"]))
+        log = vdir / "serve.log"
+        say(f"verify: starting the app with {cfg['serve']} (env from {cfg['serveEnv']})", BOLD)
+        with log.open("w") as out:
+            app = self.spawn_child(cfg["serve"], shell=True, cwd=wt, env=env, stdout=out, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + cfg["readyTimeout"]
+            while subprocess.run(cfg["ready"], shell=True, cwd=wt, env=env, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL).returncode:
+                if app.poll() is not None:
+                    return {"status": "fail", "reason": f"the app exited ({app.returncode}) before `ready` "
+                            f"succeeded; see {log}"}
+                if time.monotonic() > deadline:
+                    return {"status": "fail", "reason": f"`ready` did not succeed within {cfg['readyTimeout']}s; "
+                            f"see {log}"}
+                time.sleep(1)
+            say("verify: the app is ready; running the verifier", BOLD)
+            check, head = rec.setdefault("check", {}), git(wt, "rev-parse", "HEAD")
+            session = check.get("sessionId") if self.a.resume and check.get("status") in RETRYABLE \
+                and check.get("head") == head else None
+            self.update(rec, phase="check")
+            self.update(check, drop=() if session else ("sessionId",))
+            extra = ["--tools-enable", ",".join(BROWSER_TOOLS)] if cfg["browser"] else []
+            text = self.run_agent(self.a.verify_model, self.a.verify_effort, self.a.verify_max_turns,
+                                  self.verifier_prompt(wt), vdir / "check", check, session, cwd=wt,
+                                  tag="verify", extra=extra)
+            self.guard()
+            self.update(rec, phase=None)
+            if dirty(wt) or git(wt, "rev-parse", "HEAD") != head or self.check_worktree(wt, self.verify_branch()):
+                return {"status": "stuck", "reason": f"the verifier changed {os.path.relpath(wt)}, but it must "
+                        "be read-only; inspect the worktree, then --final-only"}
+            if check["status"] != "reported":
+                return {"status": "stuck", "agent": check["status"], "reason": f"the verifier ended "
+                        f"{check['status']}; --resume --final-only continues it (logs in {vdir / 'check'})"}
+            result = verdict(text, r"VERIFY=(PASS|FAIL)")
+            if result == "MISSING":
+                return {"status": "stuck", "reason": f"the verifier gave no VERIFY= line; see {vdir / 'check'}"}
+            counts = {k: len(re.findall(rf"\b{k}\b", text)) for k in ("VERIFIED", "FAILED", "UNVERIFIABLE")}
+            return {"status": result.lower(), "report": str(vdir / "check" / "final.txt"), "counts": counts,
+                    "text": text}
+        finally:
+            kill(app)
+            self.reap(app)
+
+    def checks_file(self):
+        """Every ticket's `## Verification` items and the parent issue, for the verifier."""
+        parts = [f"# Checks for epic #{self.a.parent}\n"]
+        for n in self.order:
+            found = section(self.tickets[n].get("body") or "", "Verification")
+            parts.append(f"## #{n} — {self.tickets[n]['title']}\n{found or '(no Verification section)'}\n")
+        parts.append(f"## Parent issue #{self.a.parent} (use its checkpoints)\n{self.parent_issue().get('body') or ''}\n")
+        path = self.folder / "verify" / "checks.md"
+        path.write_text("\n".join(parts))
+        return path
+
+    def verifier_prompt(self, wt):
+        cfg, s = self.cfg, self.skill_file
+        browser = (f"Follow {s(BROWSER_SKILL)} for anything that renders in a browser; the {BROWSER_SERVER} "
+                   "MCP tools are enabled for you.\n") if cfg["browser"] else ""
+        return f"""You are the verifier for epic #{self.a.parent}. The epic's code is checked out in this worktree
+({wt}), and the app is running: the runner started it with `{cfg['serve']}`, and `{cfg['ready']}` succeeds.
+Read AGENTS.md, then exercise every check in {self.checks_file()} against the running app: each ticket's
+`## Verification` items (above all its Manual checks) and the parent issue's checkpoints. The runner
+already ran the build and test commands; verify behavior by doing (call the endpoint, run the command,
+inspect the output), not by reading code or re-running the test suite.
+{browser}Report under `## RESULTS`, one line per check: VERIFIED, FAILED or UNVERIFIABLE, then the evidence: the
+exact command and the output that decides it. UNVERIFIABLE means this running app cannot exercise the
+check (it needs production data, a third party, or a human judgement); say why. A check you could run
+but did not is not UNVERIFIABLE.
+Read-only: do not edit files, commit, change branches, push, or post comments; stop only processes you started.
+Use only CommandCode for agent work; do not invoke codex or claude CLIs.
+End with exactly one line: VERIFY=FAIL when any check is FAILED, otherwise VERIFY=PASS.
+"""
+
+    def verify_repair(self, rec, wt, vdir):
+        """One repair agent on the implementer model, in the verify worktree."""
+        branch, rep = self.verify_branch(), rec.setdefault("repair", {})
+        session = rep.get("sessionId") if self.a.resume and rep.get("status") in RETRYABLE else None
+        failing = []
+        for r in rec.get("commands", []):
+            if r["rc"]:
+                tail = "\n".join(Path(r["log"]).read_text(errors="replace").splitlines()[-80:])
+                failing.append(f"  $ {r['cmd']}   (exit {r['rc']}; full log: {r['log']})\n```\n{tail}\n```")
+        runtime = rec.get("runtime", {})
+        if runtime.get("status") == "fail" and runtime.get("report"):
+            failing.append(f"FAILED runtime checks: see the verifier's report at {runtime['report']}. Fix only the "
+                           "FAILED checks; UNVERIFIABLE ones are not failures.")
+        elif runtime.get("status") == "fail":
+            failing.append(f"The app did not start for the runtime checks: {runtime.get('reason')}")
+        head = git(wt, "rev-parse", "HEAD")
+        say(f"\n━━ Verify repair with {self.a.model} in {os.path.relpath(wt)} ━━", BOLD, YELLOW)
+        prompt = f"""The runner's verify stage failed for epic #{self.a.parent} at {head[:12]}, in this worktree ({wt})
+on branch {branch}. Each verify command ran in its own process from the worktree root.
+{chr(10).join(failing)}
+Follow {self.skill_file('debugging-and-error-recovery')}: reproduce each failure, localize it, fix the root
+cause, then guard it with a regression test. Re-run the failing commands, then the gate `{self.gate_cmd}`.
+Commit onto {branch} referencing #{self.a.parent}. Do not push, rebase, merge, change branches, or add
+co-author trailers. Do not modify the runner, {self.hands_off}, agent configuration, hooks, or anything
+under {self.folder}. When the fix needs a human decision (the check itself is wrong, or fixing it changes
+what a ticket asked for), commit buildable work, explain, and end with STATUS=NEEDS_HUMAN.
+End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKED.
+"""
+        self.update(rep, drop=() if session else ("sessionId",))
+        text = self.run_agent(self.a.model, self.a.effort, self.a.max_turns, prompt, vdir / "repair", rep,
+                              session, cwd=wt, tag="verify repair", color=YELLOW)
+        self.guard()
+        if rep["status"] != "reported":
+            self.epic_fail(rec, rep["status"] if not dirty(wt) else "needs-human",
+                           f"the verify repair ended {rep['status']}; work kept in {os.path.relpath(wt)}; "
+                           "--resume --final-only continues it")
+            return False
+        self.update(rec, repaired=True)
+        status = verdict(text)
+        problem = ("a rebase is in progress" if rebasing(wt) else "uncommitted changes remain" if dirty(wt)
+                   else self.check_worktree(wt, branch))
+        if status != "COMPLETE" or problem:
+            self.update(rec, phase=None)
+            self.epic_fail(rec, "needs-human", f"the verify repair ended status={status}"
+                           f"{'; ' + problem if problem else ''}; see {vdir / 'repair'}. Fix it in "
+                           f"{os.path.relpath(wt)}, then --final-only")
+            return False
+        return True
+
+    def verify_merge(self, rec, wt, tip):
+        """Fast-forward the epic to the verified head (same guards as a ticket), then drop the worktree."""
+        branch, head = self.verify_branch(), git(wt, "rev-parse", "HEAD")
+        if head != tip:
+            touched = git(wt, "diff", "--name-only", tip, "HEAD", "--", *self.protected)
+            if touched:
+                return self.epic_fail(rec, "needs-human", f"the verify repair changed protected files "
+                                      f"({', '.join(touched.split())}); revert those commits in "
+                                      f"{os.path.relpath(wt)}, then --final-only")
+            with self.integration:
+                self.check_main()
+                git(self.root, "merge", "-q", "--ff-only", branch)
+            say(f"Verified fixes merged into {self.epic} (now {head[:8]})", GREEN, BOLD)
+            if self.lock_changed(self.root, tip, head):
+                say(f"a lockfile changed; running {self.install_cmd} in the main worktree", BOLD)
+                if subprocess.run(self.install_cmd, shell=True, cwd=self.root).returncode:
+                    raise Fatal(f"{self.install_cmd} failed in the main worktree after the verify repair")
+        self.update(rec, status="pass", head=head, ran=True, phase=None, drop=("reason",))
+        try:
+            git(self.root, "worktree", "remove", "--force", str(wt))
+            git(self.root, "branch", "-q", "-d", branch)
+        except subprocess.CalledProcessError as exc:
+            say(f"Verify passed, but removing {os.path.relpath(wt)} failed ({exc}); remove it by hand", YELLOW)
+        return 0
+
+    def verify_report(self, rec, head, results, runtime):
+        lines = [f"# Verify report: epic #{self.a.parent} at {head[:12]}", "", "## Commands"]
+        lines += [f"- {'PASS' if r['rc'] == 0 else 'FAIL'} `{r['cmd']}`"
+                  f"{'' if r['rc'] == 0 else ' (exit ' + str(r['rc']) + ')'}: log {r['log']}" for r in results]
+        lines += [] if results else ["- none configured"]
+        lines += ["", "## Runtime checks"]
+        status = runtime["status"]
+        if status in ("skipped", "not-run"):
+            lines.append(f"- {'skipped' if status == 'skipped' else 'not run'}: {runtime['reason']}")
+        elif runtime.get("report"):
+            counts = ", ".join(f"{v} {k}" for k, v in runtime.get("counts", {}).items())
+            lines.append(f"- VERIFY={status.upper()} ({counts}); verifier report: {runtime['report']}")
+        else:
+            lines.append(f"- {status}: {runtime['reason']}")
+        if rec.get("repaired"):
+            lines += ["", "## Repair", f"- one repair round ran: {self.folder / 'verify' / 'repair' / 'final.txt'}"]
+        if runtime.get("text"):
+            lines += ["", "## Runtime check results", runtime["text"].strip()]
+        (self.folder / "verify" / "report.md").write_text("\n".join(lines) + "\n")
+
     # ── epic review ────────────────────────────────────────────────────────
 
     def review(self):
@@ -1471,10 +1838,13 @@ and real correctness/security defects. Cite file and line for each actionable fi
 Read-only review: do not edit files, commit, change branches, push, or post comments.
 Use only CommandCode for agent work. Report INTEGRATION, EPIC SPEC, DEFECTS, and VERDICT.
 """
+        report = self.folder / "verify" / "report.md"
+        evidence = (f"The verify stage's report is evidence for your review: {report}\n" if not a.no_verify
+                    and report.exists() else "The verify stage was skipped for this run (--no-verify).\n")
         text = self.run_agent(a.final_model, a.final_effort, a.final_max_turns, f"""You are the final reviewer for epic #{a.parent}.
 Read AGENTS.md, the parent spec with gh issue view {a.parent}, and each ticket in {self.order}.
 Review git diff {base}..{head} and git log {base}..{head} as a whole.
-{checks}End with exactly one line: VERDICT=SHIP or VERDICT=FIX-FIRST.
+{evidence}{checks}End with exactly one line: VERDICT=SHIP or VERDICT=FIX-FIRST.
 """, self.folder / "review", review, session)
         self.guard()
         if dirty(self.root) or git(self.root, "rev-parse", "HEAD") != head:

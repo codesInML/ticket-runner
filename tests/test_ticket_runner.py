@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -13,7 +14,27 @@ OSMANI_SKILLS = ("incremental-implementation", "test-driven-development", "code-
                  "security-and-hardening", "api-and-interface-design", "debugging-and-error-recovery",
                  "performance-optimization", "doubt-driven-development", "code-review-and-quality",
                  "git-workflow-and-versioning", "frontend-ui-engineering", "observability-and-instrumentation",
-                 "documentation-and-adrs", "deprecation-and-migration", "ci-cd-and-automation")
+                 "documentation-and-adrs", "deprecation-and-migration", "ci-cd-and-automation",
+                 "browser-testing-with-devtools", "shipping-and-launch")
+# A tiny app for the runtime checks: it refuses to start without the serveEnv token.
+SERVE = """import http.server, os
+assert os.environ.get('VERIFY_TOKEN') == 's3cret-token', 'serveEnv not loaded'
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'hello from the app')
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(('127.0.0.1', int(os.environ['PORT'])), Handler).serve_forever()
+"""
+READY = "python3 -c \"import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['PORT'])\""
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
 
 
 def planned(body, blocked_by=""):
@@ -44,7 +65,8 @@ args=sys.argv[1:]
 with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(args)+'\\n')
 none={'totalCount':0, 'nodes':[]}
 if args[:2] == ['issue', 'list']: print(os.environ['ISSUES'])
-elif args[:2] == ['issue', 'view'] and 'body' in args: print(json.dumps({'body': os.environ.get('PARENT_BODY', '')}))
+elif args[:2] == ['issue', 'view'] and any('body' in a for a in args):
+    print(json.dumps({'title': 'Epic title', 'body': os.environ.get('PARENT_BODY', '')}))
 elif args[:2] == ['issue', 'view']: print('CLOSED')
 elif args[:2] == ['api', 'graphql']:
     query=next(a for a in args if a.startswith('query='))
@@ -55,12 +77,36 @@ elif args[:2] == ['api', 'graphql']:
         self.fake("command-code", """import json, os, subprocess, sys
 from pathlib import Path
 args=sys.argv[1:]
+if args[:2] == ['mcp', 'list']:
+    print(os.environ.get('MCP_LIST', 'No MCP servers configured'))
+    sys.exit(0)
 with open(os.environ['AGENT_LOG'], 'a') as f: f.write(json.dumps(args)+'\\n')
 prompt=args[args.index('-p')+1]
 review='You are the final reviewer' in prompt
 ticket_review='You are the ticket reviewer' in prompt
 mode=os.environ.get('MODE', 'success')
 cap=mode in ('cap', 'cap-commit') and '--resume' not in args
+def done(text, session, subtype='success', rc=0):
+    print(json.dumps({'type':'result', 'subtype':subtype, 'sessionId':session, 'finalText':text}))
+    sys.exit(rc)
+def commit(name, text):
+    Path(name).write_text(text)
+    subprocess.run(['git', 'add', name], check=True)
+    subprocess.run(['git', 'commit', '-qm', 'Change ' + name], check=True)
+if 'You are the verifier' in prompt:
+    import urllib.request
+    port = os.environ.get('TEST_PORT')
+    seen = urllib.request.urlopen('http://127.0.0.1:' + port).read().decode().strip() if port else 'no app'
+    if mode == 'verifier-edit': Path('work.txt').write_text('verifier edit')
+    if mode == 'verifier-cap' and '--resume' not in args: done('', 'verify-session', 'max_turns', 8)
+    fail = mode in ('verify-fail', 'verify-fail-always') and (mode == 'verify-fail-always' or not Path('fixed.txt').exists())
+    done('## RESULTS\\n- ' + ('FAILED' if fail else 'VERIFIED') + ' GET / answered ' + seen +
+         '\\n- UNVERIFIABLE needs production data\\n' + ('VERIFY=FAIL' if fail else 'VERIFY=PASS'), 'verify-session')
+if 'verify stage failed' in prompt:
+    if mode == 'repair-cap' and '--resume' not in args: done('', 'repair-session', 'max_turns', 8)
+    if mode == 'repair-protected': commit('AGENTS.md', 'changed by the repair')
+    commit('other.txt' if mode == 'repair-noop' else 'fixed.txt', 'fixed')
+    done('STATUS=NEEDS_HUMAN' if mode == 'repair-human' else 'STATUS=COMPLETE', 'repair-session')
 if ticket_review:
     if mode == 'review-edit': Path('work.txt').write_text('reviewer edit')
     if mode == 'review-cap' and '--resume' not in args:
@@ -454,6 +500,180 @@ sys.exit(8 if cap else 0)
         self.issues.append({"number": 211, "title": "Third", "body": planned("Third slice"), "state": "OPEN"})
         self.assertEqual(self.run_osmani().returncode, 0)
         self.assertIn('The `## Ticket Runner` section of AGENTS.md lists', self.prompt(self.calls()[-3]))
+
+
+    # ── verify stage ─────────────────────────────────────────────────────
+
+    def verify_dir(self):
+        return self.root / ".scratch/run-tickets-commandcode/207/verify"
+
+    def kinds(self):
+        return ['verifier' if 'You are the verifier' in self.prompt(c) else
+                'repair' if 'verify stage failed' in self.prompt(c) else
+                'epic review' if 'You are the final reviewer' in self.prompt(c) else
+                'ticket review' if 'You are the ticket reviewer' in self.prompt(c) else 'implement'
+                for c in self.calls()]
+
+    def serve(self, **config):
+        port = free_port()
+        (self.root / "serve.py").write_text(SERVE)
+        (self.root / ".env.verify").write_text(f"# local only\nPORT={port}\nexport VERIFY_TOKEN=\"s3cret-token\"\n")
+        with (self.root / ".gitignore").open("a") as f:
+            f.write(".env.verify\n")
+        self.git("add", "serve.py", ".gitignore")
+        self.configure(serve="python3 serve.py", ready=READY, serveEnv=".env.verify", readyTimeout=20,
+                       gate=["true"], **config)
+        self.env["TEST_PORT"] = str(port)
+        return port
+
+    def test_verify_commands_pass_and_the_epic_review_gets_the_report(self):
+        self.configure(verify=["echo first", "echo second"])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = self.state()
+        self.assertEqual(state['_verify']['status'], 'pass')
+        self.assertEqual(state['_verify']['head'], self.git('rev-parse', 'HEAD'))
+        self.assertIn('first', (self.verify_dir() / 'cmd-1.log').read_text())
+        self.assertIn('second', (self.verify_dir() / 'cmd-2.log').read_text())
+        report = (self.verify_dir() / 'report.md').read_text()
+        self.assertIn('PASS `echo first`', report)
+        self.assertIn('skipped: no `serve`', report)
+        self.assertIn(str(self.verify_dir() / 'report.md'), self.prompt(self.calls()[-1]))
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review'])
+        self.assertFalse((self.root / '.scratch/worktrees/verify').exists())
+        self.assertEqual(self.git('branch', '--list', 'cc/207/verify'), '')
+
+    def test_verify_failure_gets_one_repair_then_re_verifies_and_fast_forwards(self):
+        self.configure(verify=["test -f fixed.txt"], gate=["true"])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair', 'epic review'])
+        repair = self.calls()[2]
+        self.assertIn(str(self.skills / 'debugging-and-error-recovery' / 'SKILL.md'), self.prompt(repair))
+        self.assertIn('$ test -f fixed.txt', self.prompt(repair))
+        self.assertEqual(self.model(repair), 'deepseek/deepseek-v4.1-flash')
+        self.assertTrue((self.root / 'fixed.txt').exists())  # The epic branch fast-forwarded to the fix.
+        state = self.state()
+        self.assertEqual(state['_verify']['head'], self.git('rev-parse', 'HEAD'))
+        self.assertEqual(state['_verify']['status'], 'pass')
+        self.assertTrue(state['_verify']['repaired'])
+        self.assertTrue((self.verify_dir() / 'gate-1.log').exists())
+        self.assertIn('one repair round ran', (self.verify_dir() / 'report.md').read_text())
+
+    def test_verify_still_failing_needs_a_human_and_skips_the_epic_review(self):
+        self.configure(verify=["test -f fixed.txt"], gate=["true"])
+        result = self.run_script(mode='repair-noop')
+        self.assertEqual(result.returncode, 1)
+        state = self.state()
+        self.assertEqual(state['_verify']['status'], 'needs-human')
+        self.assertIn('still fails after one repair', state['_verify']['reason'])
+        self.assertNotIn('_review', state)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair'])
+        wt = self.root / '.scratch/worktrees/verify'
+        self.assertTrue((wt / 'other.txt').exists())
+        self.assertFalse((self.root / 'other.txt').exists())
+        self.assertIn(['issue', 'edit', '207', '--add-label', 'needs-human', '--remove-label', 'in-progress'],
+                      self.gh_calls())
+        # A person fixes it in the kept worktree; the next run re-verifies without another repair.
+        (wt / 'fixed.txt').write_text('by hand')
+        subprocess.run(['git', 'add', 'fixed.txt'], cwd=wt, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'Fix by hand'], cwd=wt, check=True)
+        result = self.run_script('--final-only')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair', 'epic review'])
+        self.assertEqual((self.root / 'fixed.txt').read_text(), 'by hand')
+
+    def test_verify_repair_touching_a_protected_file_is_not_merged(self):
+        self.configure(verify=["test -f fixed.txt"], gate=["true"])
+        result = self.run_script(mode='repair-protected')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('protected files (AGENTS.md)', self.state()['_verify']['reason'])
+        self.assertFalse((self.root / 'fixed.txt').exists())
+
+    def test_runtime_checks_serve_the_app_with_serve_env_and_stop_it(self):
+        port = self.serve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'verifier', 'epic review'])
+        verifier = self.calls()[2]
+        self.assertEqual(self.model(verifier), 'gpt-6-luna')
+        self.assertEqual(verifier[verifier.index('--effort')+1], 'high')
+        self.assertNotIn('--tools-enable', verifier)
+        self.assertIn('checks.md', self.prompt(verifier))
+        checks = (self.verify_dir() / 'checks.md').read_text()
+        self.assertIn('## Parent issue #207', checks)
+        self.assertIn('Checkpoint: after #210', checks)
+        self.assertIn('answered hello from the app', (self.verify_dir() / 'check/final.txt').read_text())
+        report = (self.verify_dir() / 'report.md').read_text()
+        self.assertIn('VERIFY=PASS (1 VERIFIED, 0 FAILED, 1 UNVERIFIABLE)', report)
+        self.assertNotIn('s3cret-token', result.stdout + result.stderr)
+        with socket.socket() as sock:  # The app was stopped.
+            self.assertNotEqual(sock.connect_ex(('127.0.0.1', port)), 0)
+
+    def test_failed_runtime_check_is_repaired_then_the_whole_stage_reruns(self):
+        self.serve(verify=["echo built"])
+        result = self.run_script(mode='verify-fail')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'verifier', 'repair', 'verifier', 'epic review'])
+        self.assertIn('FAILED runtime checks', self.prompt(self.calls()[3]))
+        self.assertTrue((self.root / 'fixed.txt').exists())
+
+    def test_runtime_checks_refuse_without_a_separate_serve_env(self):
+        (self.root / ".env").write_text("SECRET=1\n")
+        for config, expected in [({}, "sets serve but no serveEnv"),
+                                 ({"serveEnv": ".env.missing"}, "serveEnv .env.missing does not exist"),
+                                 ({"serveEnv": ".env"}, "must not be the developer's .env")]:
+            with self.subTest(config=config):
+                self.configure(commit=False, serve="python3 serve.py", ready="true", **config)
+                result = self.run_script('--dry-run')
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stderr)
+        self.configure(commit=False, serve="python3 serve.py", ready="true")
+        self.assertEqual(self.run_script('--dry-run', '--no-verify').returncode, 0)
+
+    def test_browser_refuses_until_the_devtools_server_is_registered(self):
+        self.serve(browser=True)
+        result = self.run_script('--dry-run')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('command-code mcp add --scope user --transport stdio chrome-devtools -- '
+                      'npx -y chrome-devtools-mcp@latest --isolated', result.stderr)
+        self.assertIn('"browser": false', result.stderr)
+        self.assertFalse((self.root / 'agents.log').exists())
+        self.env["MCP_LIST"] = "chrome-devtools: npx -y chrome-devtools-mcp@latest --isolated - Connected"
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        verifier = self.calls()[2]
+        self.assertIn('mcp__chrome-devtools__navigate_page', verifier[verifier.index('--tools-enable')+1])
+        self.assertIn(str(self.skills / 'browser-testing-with-devtools' / 'SKILL.md'), self.prompt(verifier))
+        self.assertNotIn('--tools-enable', self.calls()[0])
+
+    def test_verifier_must_stay_read_only(self):
+        self.serve()
+        result = self.run_script(mode='verifier-edit')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.state()['_verify']['status'], 'needs-human')
+        self.assertIn('must be read-only', self.state()['_verify']['reason'])
+        self.assertNotIn('repair', self.kinds())
+
+    def test_interrupted_verifier_resumes_its_session(self):
+        self.serve()
+        self.assertEqual(self.run_script(mode='verifier-cap').returncode, 1)
+        self.assertEqual(self.state()['_verify']['status'], 'turn-cap')
+        result = self.run_script('--resume', '--final-only', mode='verifier-cap')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        resumed = self.calls()[3]
+        self.assertEqual(resumed[resumed.index('--resume')+1], 'verify-session')
+
+    def test_interrupted_verify_repair_resumes_its_session(self):
+        self.configure(verify=["test -f fixed.txt"], gate=["true"])
+        self.assertEqual(self.run_script(mode='repair-cap').returncode, 1)
+        self.assertEqual(self.state()['_verify']['status'], 'turn-cap')
+        result = self.run_script('--resume', '--final-only', mode='repair-cap')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        resumed = self.calls()[3]
+        self.assertIn('verify stage failed', self.prompt(resumed))
+        self.assertEqual(resumed[resumed.index('--resume')+1], 'repair-session')
+        self.assertTrue((self.root / 'fixed.txt').exists())
 
 
 if __name__ == '__main__':
