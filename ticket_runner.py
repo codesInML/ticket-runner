@@ -59,9 +59,14 @@ OSMANI_SKILLS = ("incremental-implementation", "test-driven-development", "code-
                  "git-workflow-and-versioning")
 OSMANI_SOURCE = "https://github.com/addyosmani/agent-skills.git"
 RETRYABLE = {"turn-cap", "provider-error", "interrupted", "in-progress", "error"}
-GATE = "npx tsc --noEmit && npm test"
-INSTALL = "npm ci"
-# Copy-on-write clones keep each worktree's node_modules isolated at near-zero cost.
+# Optional project config, relative to the project root. Every key is optional; these are the defaults.
+CONFIG = ".agents/ticket-runner.json"
+DEFAULTS = {"install": "npm ci", "lockfiles": ["package-lock.json"], "dependencyDirs": ["node_modules"],
+            "linkFiles": [".env"], "gate": ["npx tsc --noEmit", "npm test"], "verify": [], "serve": None,
+            "ready": None, "readyTimeout": 120, "serveEnv": None, "browser": False, "prBase": None,
+            "mergeMethod": "merge"}
+MERGE_METHODS = ("merge", "squash", "rebase")
+# Copy-on-write clones keep each worktree's dependency directories isolated at near-zero cost.
 CLONES = (["cp", "-cR"], ["cp", "-R"]) if sys.platform == "darwin" else (["cp", "-R", "--reflink=auto"],)
 # NO_COLOR / FORCE_COLOR follow https://no-color.org conventions.
 COLOR = bool(os.getenv("FORCE_COLOR")) or (
@@ -264,6 +269,49 @@ def section(body, name):
     return found[1].strip() if found else None
 
 
+def relative(value):
+    return isinstance(value, str) and bool(value.strip()) and not Path(value).is_absolute() \
+        and ".." not in Path(value).parts
+
+
+def load_config(root):
+    """The project config over the generic defaults; refuses unknown keys, wrong types and unsafe paths."""
+    path = root / CONFIG
+    try:
+        raw = json.loads(path.read_text()) if path.exists() else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{CONFIG} is not valid JSON: {exc}")
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"{CONFIG} must hold a JSON object")
+    unknown = sorted(set(raw) - set(DEFAULTS))
+    if unknown:
+        raise RuntimeError(f"{CONFIG} has unknown key(s) {', '.join(unknown)}; allowed: {', '.join(DEFAULTS)}")
+    cfg = {**DEFAULTS, **raw}
+    text = lambda v: isinstance(v, str) and bool(v.strip())
+    paths = lambda v: isinstance(v, list) and all(map(relative, v))
+    rules = {"install": (text, "a non-empty string"),
+             "lockfiles": (paths, "a list of relative paths"),
+             "dependencyDirs": (paths, "a list of relative paths"),
+             "linkFiles": (paths, "a list of relative paths"),
+             "gate": (lambda v: isinstance(v, list) and all(map(text, v)), "a list of shell commands"),
+             "verify": (lambda v: isinstance(v, list) and all(map(text, v)), "a list of shell commands"),
+             "serve": (lambda v: v is None or text(v), "a shell command or null"),
+             "ready": (lambda v: v is None or text(v), "a shell command or null"),
+             "readyTimeout": (lambda v: type(v) is int and v > 0, "a positive integer (seconds)"),
+             "serveEnv": (lambda v: v is None or relative(v), "a relative path or null"),
+             "browser": (lambda v: type(v) is bool, "true or false"),
+             "prBase": (lambda v: v is None or text(v), "a branch name or null"),
+             "mergeMethod": (lambda v: v in MERGE_METHODS, f"one of {', '.join(MERGE_METHODS)}")}
+    problems = [f"{key} must be {what}" for key, (ok, what) in rules.items() if not ok(cfg[key])]
+    if not problems and cfg["serve"] and not cfg["ready"]:
+        problems.append("serve needs a ready command to poll")
+    if not problems and cfg["browser"] and not cfg["serve"]:
+        problems.append("browser needs serve: the verifier can only browse a running app")
+    if problems:
+        raise RuntimeError(f"{CONFIG}: " + "; ".join(problems))
+    return cfg
+
+
 def plan_problems(tickets, parent_body):
     """Refusals and warnings for an Osmani plan: every ticket must carry the shared ticket template.
 
@@ -353,8 +401,17 @@ while the runner works; it fast-forwards the epic branch there.
 A ticket graph (done, running, ready, waiting, failed, held per wave) prints
 before the run starts and again whenever a ticket finishes; --dry-run shows it too.
 
-Each worktree gets an APFS clone of node_modules and a symlink to .env. When a
-merge changes package-lock.json, INSTALL_CMD runs in the main worktree.
+Project config (.agents/ticket-runner.json, optional JSON; every key optional):
+  install         "npm ci"            runs when a merge changes a lockfile
+  lockfiles       ["package-lock.json"]
+  dependencyDirs  ["node_modules"]    cloned copy-on-write into each worktree
+  linkFiles       [".env"]            symlinked into each worktree
+  gate            ["npx tsc --noEmit", "npm test"]   run after a rebase onto a moved epic tip
+  prBase, mergeMethod, verify, serve, ready, readyTimeout, serveEnv, browser
+The config, AGENTS.md, linkFiles and serveEnv are protected: an agent changing one stops the run,
+and a ticket whose diff touches one is not integrated. AGENTS.md may carry a `## Ticket Runner`
+section naming the project's personal data, governed parameters, public contracts and
+performance-sensitive areas; the prompts point agents at it.
 
 Merged (done) and closed tickets are always skipped. --resume continues the saved
 CommandCode session of an unfinished ticket in its kept worktree, and retries
@@ -371,7 +428,7 @@ Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (osma
      ~/.agents/skills), IMPL_MODEL, IMPL_EFFORT, IMPL_MAX_TURNS, IMPL_JOBS,
      TICKET_REVIEW_MODEL, TICKET_REVIEW_EFFORT, TICKET_REVIEW_MAX_TURNS,
      FINAL_MODEL, FINAL_EFFORT, FINAL_MAX_TURNS (the epic review),
-     GATE_CMDS (default: npx tsc --noEmit && npm test), INSTALL_CMD (default: npm ci).
+     GATE_CMDS and INSTALL_CMD (override the config's gate and install).
 """)
     p.add_argument("parent", type=positive)
     p.add_argument("--workflow", choices=WORKFLOWS, default=os.getenv("WORKFLOW"),
@@ -543,6 +600,7 @@ def main():
     a = parse_args()
     root = Path(command("git", "rev-parse", "--show-toplevel"))
     os.chdir(root)
+    cfg = load_config(root)
     folder = root / ".scratch" / "run-tickets-commandcode" / str(a.parent)
     path = folder / "state.json"
     data = json.loads(path.read_text()) if path.exists() else {}
@@ -631,12 +689,12 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("Another ticket runner is active in this checkout")
-        return Runner(a, root, folder, path, data, tickets, levels, skill, skills_dir).execute()
+        return Runner(a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg).execute()
 
 
 class Runner:
-    def __init__(self, a, root, folder, path, data, tickets, levels, skill, skills_dir):
-        self.a, self.root, self.folder, self.path, self.data = a, root, folder, path, data
+    def __init__(self, a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg):
+        self.a, self.root, self.folder, self.path, self.data, self.cfg = a, root, folder, path, data, cfg
         self.tickets, self.levels, self.skill, self.skills_dir = tickets, levels, skill, skills_dir
         self.osmani = a.workflow == "osmani"
         self.order = [n for level in levels for n in level]
@@ -645,19 +703,24 @@ class Runner:
         self.blockers = {n: t["blockers"] for n, t in tickets.items()}
         self.worktrees = root / ".scratch" / "worktrees"
         self.binary = os.getenv("COMMANDCODE_BIN", "command-code")
-        self.gate_cmd = os.getenv("GATE_CMDS", GATE)
-        self.install_cmd = os.getenv("INSTALL_CMD", INSTALL)
+        self.gate_cmd = os.getenv("GATE_CMDS") or " && ".join(cfg["gate"]) or "true"
+        self.install_cmd = os.getenv("INSTALL_CMD") or cfg["install"]
         # state guards data/state.json; integration serializes every change to the epic branch,
         # worktree creation and main-worktree installs.
         self.state, self.integration, self.spawn = threading.RLock(), threading.Lock(), threading.Lock()
         self.children, self.threads, self.events = set(), {}, queue.Queue()
         self.stopping, self.fatal = threading.Event(), None
         home = Path(__file__).resolve().parent
+        project = ["AGENTS.md", CONFIG, *cfg["linkFiles"], *([cfg["serveEnv"]] if cfg["serveEnv"] else [])]
+        project = list(dict.fromkeys(project))
         protected = [Path(__file__).resolve(), home / "bin/ticket-runner", home / "bin/ticket-runner-osmani",
-                     root / "AGENTS.md", root / ".env"]
-        self.snapshots = {p: p.read_bytes() for p in protected if p.exists()}
-        self.protected = [str(p.resolve().relative_to(root.resolve())) for p in protected
-                          if p.resolve().is_relative_to(root.resolve())]
+                     *(root / f for f in project)]
+        # A protected file that is missing now must stay missing: an agent creating one counts as changing it.
+        self.snapshots = {p: p.read_bytes() if p.exists() else None for p in protected}
+        self.protected = project
+        self.hands_off = ", ".join(project)
+        notes = (root / "AGENTS.md").read_text(errors="replace") if (root / "AGENTS.md").exists() else ""
+        self.notes = section(notes, "Ticket Runner") is not None
 
     # ── state ──────────────────────────────────────────────────────────────
 
@@ -705,7 +768,7 @@ class Runner:
             self.children.discard(child)
 
     def guard(self):
-        changed = [p for p, contents in self.snapshots.items() if not p.exists() or p.read_bytes() != contents]
+        changed = [p for p, contents in self.snapshots.items() if (p.read_bytes() if p.exists() else None) != contents]
         if changed:
             raise Fatal(f"Agent modified {', '.join(map(str, changed))}; inspect and restore before resuming")
         if git(self.root, "branch", "--show-current") != self.epic:
@@ -957,25 +1020,35 @@ class Runner:
         say(f"#{n} {status}: {reason}", YELLOW, BOLD)
 
     def provision(self, wt):
-        modules, target = self.root / "node_modules", wt / "node_modules"
-        if modules.is_dir() and not target.exists():
+        for name in self.cfg["dependencyDirs"]:
+            source, target = self.root / name, wt / name
+            if not source.is_dir() or target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
             for clone in CLONES:
-                if not subprocess.run([*clone, str(modules), str(target)], capture_output=True).returncode:
+                if not subprocess.run([*clone, str(source), str(target)], capture_output=True).returncode:
                     break
                 shutil.rmtree(target, ignore_errors=True)
             else:
-                raise RuntimeError(f"Could not copy node_modules into {wt}")
-        env = self.root / ".env"
-        if env.exists() and not os.path.lexists(wt / ".env"):
-            (wt / ".env").symlink_to(env)
+                raise RuntimeError(f"Could not copy {name} into {wt}")
+        for name in self.cfg["linkFiles"]:
+            source, target = self.root / name, wt / name
+            if source.exists() and not os.path.lexists(target):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to(source)
 
     def check_worktree(self, wt, branch):
         if git(wt, "branch", "--show-current") != branch:
             return f"worktree left {branch}"
-        env = self.root / ".env"
-        if env.exists() and (not (wt / ".env").is_symlink() or Path(os.readlink(wt / ".env")) != env):
-            return ".env in the worktree no longer links to the main .env"
+        for name in self.cfg["linkFiles"]:
+            source, target = self.root / name, wt / name
+            if source.exists() and (not target.is_symlink() or Path(os.readlink(target)) != source):
+                return f"{name} in the worktree no longer links to the main {name}"
         return None
+
+    def lock_changed(self, cwd, old, new):
+        return bool(self.cfg["lockfiles"]) and bool(attempt(cwd, "diff", "--quiet", old, new, "--",
+                                                            *self.cfg["lockfiles"]).returncode)
 
     def implement(self, n, record, tdir):
         branch, wt = self.branch(n), self.worktrees / str(n)
@@ -1021,7 +1094,7 @@ You are in a dedicated git worktree for this ticket. Other tickets of this epic 
 their own worktrees; the runner integrates them, so ignore them.
 Commit buildable work onto the current branch {branch}, referencing #{n}.
 Do not push, open PRs, change branches, rebase, merge, or add co-author trailers. Do not modify the
-runner, AGENTS.md, agent configuration, hooks, .env, or anything under {self.folder}. Existing partial
+runner, {self.hands_off}, agent configuration, hooks, or anything under {self.folder}. Existing partial
 edits/commits from this ticket are yours to finish when resuming. Pre-ticket commit: {base}.
 If an acceptance criterion requires a human decision, commit all buildable work and report it.
 End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKED.
@@ -1053,18 +1126,25 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
     def skill_file(self, name):
         return self.skills_dir / name / "SKILL.md"
 
+    def domain(self):
+        """Where a prompt learns the project's sensitive areas: AGENTS.md's `## Ticket Runner` section."""
+        if self.notes:
+            return ("The `## Ticket Runner` section of AGENTS.md lists what this project counts as personal or "
+                    "sensitive data,\ngoverned parameters, public contracts and performance-sensitive areas; "
+                    "use it for the triggers below.\n")
+        return ("AGENTS.md has no `## Ticket Runner` section, so use general judgement for what counts as personal "
+                "or\nsensitive data, a governed parameter, a public contract or a performance-sensitive area.\n")
+
     def osmani_brief(self, n, tdir):
         s = self.skill_file
-        governance = self.root / "docs/model-governance.md"
-        governed = "a governed decision parameter" + (f" ({governance})" if governance.exists() else "")
         return f"""Read AGENTS.md, then implement issue #{n} by following these skills in order:
 {s('incremental-implementation')}, then {s('test-driven-development')} for every slice, then
 {s('code-simplification')} on your own diff only.
 Read the full ticket at {tdir / 'ticket.md'}. Satisfy its acceptance criteria and its Verification
-section without expanding scope. Load a conditional skill only when the ticket needs it:
-- {s('security-and-hardening')}: auth, untrusted input, or personal data (BVNs, bureau responses, statements)
-- {s('api-and-interface-design')}: a public /v1 DTO, webhook payload or module interface changes
-- {s('performance-optimization')}: Mongo queries, aggregation pipelines or queue throughput
+section without expanding scope. {self.domain()}Load a conditional skill only when the ticket needs it:
+- {s('security-and-hardening')}: auth, untrusted input, or personal or sensitive data
+- {s('api-and-interface-design')}: a public contract or module interface changes
+- {s('performance-optimization')}: the ticket touches a performance-sensitive area
 - {s('debugging-and-error-recovery')}: a test or build breaks for a reason you do not yet understand
 - {s('doubt-driven-development')}: only for claims a test cannot pin down (invariants, cross-module
   contracts, migrations, anything irreversible). One doubt cycle per claim in this unattended run; a
@@ -1076,7 +1156,7 @@ acceptance criterion means (seams, naming, file placement, which existing patter
 what the surrounding code does, and list each choice under an `## ASSUMPTIONS` heading in your final
 report. Stop instead (commit buildable work, state the question, end with STATUS=NEEDS_HUMAN) when the
 ticket contradicts the code or another ticket, when an acceptance criterion can be read two ways that
-lead to different behavior, or when meeting it would change {governed} or a public API contract the
+lead to different behavior, or when meeting it would change a governed parameter or a public contract the
 ticket does not mention.
 """
 
@@ -1105,10 +1185,10 @@ Confirm every BLOCKING finding there is fixed and raise anything the fix broke; 
         return f"""You are the ticket reviewer for issue #{n} of epic #{self.a.parent}. Someone else wrote this
 code; review it with fresh eyes and take none of their claims on trust.
 Read AGENTS.md and the ticket at {tdir / 'ticket.md'}, then follow {s('code-review-and-quality')}
-on git diff {base}..HEAD and git log {base}..HEAD in this worktree. Load these only when the diff needs them:
-- {s('security-and-hardening')}: auth, untrusted input, or personal data (BVNs, bureau responses, statements)
-- {s('performance-optimization')}: Mongo queries, aggregation pipelines or queue throughput
-- {s('api-and-interface-design')}: a public /v1 DTO, webhook payload or module interface
+on git diff {base}..HEAD and git log {base}..HEAD in this worktree. {self.domain()}Load these only when the diff needs them:
+- {s('security-and-hardening')}: auth, untrusted input, or personal or sensitive data
+- {s('performance-optimization')}: a performance-sensitive area
+- {s('api-and-interface-design')}: a public contract or module interface
 The implementer's final report is at {tdir / 'final.txt'}. Check every choice under its ASSUMPTIONS
 heading and raise each wrong one as a finding.
 {again}Report under these markdown headings, citing file and line for every finding:
@@ -1176,7 +1256,7 @@ and REJECTED findings are not this ticket's to act on. Follow {self.skill_file('
 for each fix that changes behavior. If you disagree with a finding, say why in your final report; the same
 reviewer re-reviews once. Run typechecking, the focused tests, and the full suite once, then commit onto
 {branch} referencing #{n}. Do not push, rebase, merge, change branches, or add co-author trailers. Do not
-modify the runner, AGENTS.md, agent configuration, hooks, .env, or anything under {self.folder}.
+modify the runner, {self.hands_off}, agent configuration, hooks, or anything under {self.folder}.
 End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKED.
 """
         if answered:
@@ -1247,14 +1327,14 @@ Those changes come from tickets merged while you worked. Resolve every conflict 
 survives, run typechecking and the tests covering the touched code, then `git add` the files and run
 `GIT_EDITOR=true git -c core.commentChar=auto rebase --continue` until the rebase finishes (commentChar
 keeps commit subjects that start with #{n}). Do not abort the rebase, change branches, push, or modify
-AGENTS.md, the runner, or .env.
+the runner or {self.hands_off}.
 {self.repair_guidance('conflict')}End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKED.
 """):
                     return
                 repaired = True
-            if attempt(wt, "diff", "--quiet", before, "HEAD", "--", "package-lock.json").returncode:
+            if self.lock_changed(wt, before, "HEAD"):
                 log = self.log(tdir, "install")
-                say(f"#{n} package-lock.json changed under it; running {self.install_cmd} in its worktree", BOLD, color)
+                say(f"#{n} a lockfile changed under it; running {self.install_cmd} in its worktree", BOLD, color)
                 if self.shell(self.install_cmd, wt, log):
                     return self.fail(n, record, "needs-human", f"{self.install_cmd} failed in the worktree; see {log}")
             passed, log = self.gate(n, wt, tdir)
@@ -1270,7 +1350,7 @@ Last lines of output (full log: {log}):
 ```
 Tickets merged while you worked may have changed code yours relies on. Fix the failure, re-run the gate
 command, and commit the fix on {branch} referencing #{n}. Do not rebase, merge, change branches, push,
-or modify AGENTS.md, the runner, or .env.
+or modify the runner or {self.hands_off}.
 {self.repair_guidance('gate')}End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKED.
 """):
                     return
@@ -1288,8 +1368,8 @@ or modify AGENTS.md, the runner, or .env.
         self.label(n, "agent-done", "in-progress")
         count = git(self.root, "rev-list", "--count", f"{tip}..{head}")
         say(f"#{n} merged into {self.epic} ({count} commit{'s' * (count != '1')}, now {head[:8]})", GREEN, BOLD)
-        if attempt(self.root, "diff", "--quiet", tip, head, "--", "package-lock.json").returncode:
-            say(f"package-lock.json changed; running {self.install_cmd} in the main worktree", BOLD)
+        if self.lock_changed(self.root, tip, head):
+            say(f"a lockfile changed; running {self.install_cmd} in the main worktree", BOLD)
             if subprocess.run(self.install_cmd, shell=True, cwd=self.root).returncode:
                 raise Fatal(f"{self.install_cmd} failed in the main worktree after merging #{n}; "
                             "fix dependencies there, then --resume")
@@ -1397,8 +1477,9 @@ Review git diff {base}..{head} and git log {base}..{head} as a whole.
         s = self.skill_file
         reports = sorted(self.folder.glob("*/review/round-*/final.txt"))
         listed = "\n".join(f"  {r}" for r in reports) or "  (none found)"
-        return f"""Follow {s('code-review-and-quality')} across that whole diff; load {s('security-and-hardening')}
-or {s('performance-optimization')} only when the epic touches those areas.
+        return f"""{self.domain()}Follow {s('code-review-and-quality')} across that whole diff; load {s('security-and-hardening')}
+only when the epic touches auth, untrusted input or personal or sensitive data, and
+{s('performance-optimization')} only when it touches a performance-sensitive area.
 Every ticket passed its own ticket review; the reports are:
 {listed}
 Their DEFERRED findings are real defects that no ticket owned.

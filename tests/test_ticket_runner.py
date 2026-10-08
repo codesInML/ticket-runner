@@ -70,6 +70,13 @@ if ticket_review:
                                    '- old bug in b.ts:2\\n' + ('VERDICT=FAIL' if fail else 'VERDICT=PASS')}))
     sys.exit(0)
 if not review:
+    if os.environ.get('PROBE'):
+        with open(os.environ['PROBE'], 'a') as f:
+            f.write(json.dumps({'link': os.path.islink('local.cfg'), 'deps': os.path.exists('deps/lib.txt')}) + '\\n')
+    if mode == 'edit-config': Path(os.environ['ROOT'], '.agents/ticket-runner.json').write_text('{}')
+    if mode == 'commit-config':
+        Path('.agents/ticket-runner.json').write_text('{"gate": ["false"]}')
+        subprocess.run(['git', 'add', '.agents/ticket-runner.json'], check=True)
     Path('work.txt').write_text('partial' if cap else str(len(Path(os.environ['AGENT_LOG']).read_text())))
     if not cap or mode == 'cap-commit':
         subprocess.run(['git', 'add', 'work.txt'], check=True)
@@ -101,7 +108,8 @@ sys.exit(8 if cap else 0)
         self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
                         COMMANDCODE_BIN=str(self.bin / "command-code"), IMPLEMENT_SKILL=str(skill),
                         AGENT_SKILLS_DIR=str(self.skills), PARENT_BODY="## Checkpoint: after #210\n- [ ] Tests pass",
-                        CALL_LOG=str(self.root / "gh.log"), AGENT_LOG=str(self.root / "agents.log"))
+                        CALL_LOG=str(self.root / "gh.log"), AGENT_LOG=str(self.root / "agents.log"),
+                        ROOT=str(self.root))
         for name in ('IMPL_MODEL', 'IMPL_EFFORT', 'IMPL_MAX_TURNS', 'FINAL_MODEL', 'FINAL_EFFORT', 'FINAL_MAX_TURNS',
                      'WORKFLOW', 'TICKET_REVIEW_MODEL', 'TICKET_REVIEW_EFFORT', 'TICKET_REVIEW_MAX_TURNS'):
             self.env.pop(name, None)
@@ -125,6 +133,13 @@ sys.exit(8 if cap else 0)
     def plan_osmani(self):
         self.issues[0]["body"] = planned("First slice")
         self.issues[1]["body"] = planned("Second slice", blocked_by="#209")
+
+    def configure(self, commit=True, **config):
+        (self.root / ".agents").mkdir(exist_ok=True)
+        (self.root / ".agents/ticket-runner.json").write_text(json.dumps(config))
+        if commit:
+            self.git("add", ".agents/ticket-runner.json")
+            self.git("commit", "-qm", "Configure the runner")
 
     def gh_calls(self):
         return [json.loads(line) for line in (self.root / "gh.log").read_text().splitlines()]
@@ -365,6 +380,66 @@ sys.exit(8 if cap else 0)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.state()['_meta']['workflow'], 'osmani')
         self.assertIn('Every ticket passed its own ticket review', self.prompt(self.calls()[-1]))
+
+
+    # ── project config + generic prompts ─────────────────────────────────
+
+    def test_config_refuses_unknown_keys_bad_types_and_unsafe_paths(self):
+        for config, expected in [({"gat": ["true"]}, "unknown key(s) gat"),
+                                 ({"gate": "npm test"}, "gate must be a list of shell commands"),
+                                 ({"mergeMethod": "fast"}, "mergeMethod must be one of merge, squash, rebase"),
+                                 ({"linkFiles": ["../secrets"]}, "linkFiles must be a list of relative paths"),
+                                 ({"readyTimeout": 0}, "readyTimeout must be a positive integer"),
+                                 ({"serve": "npm start"}, "serve needs a ready command"),
+                                 ({"browser": True}, "browser needs serve")]:
+            with self.subTest(config=config):
+                self.configure(commit=False, **config)
+                result = self.run_script('--dry-run')
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stderr)
+                self.assertFalse((self.root / 'agents.log').exists())
+
+    def test_config_provisions_dependency_dirs_and_link_files(self):
+        (self.root / "deps").mkdir()
+        (self.root / "deps/lib.txt").write_text("lib")
+        (self.root / "local.cfg").write_text("secret=1")
+        with (self.root / ".gitignore").open("a") as f:
+            f.write("deps/\nlocal.cfg\nprobe.jsonl\n")
+        self.git("add", ".gitignore")
+        self.configure(dependencyDirs=["deps"], linkFiles=["local.cfg"])
+        self.env["PROBE"] = str(self.root / "probe.jsonl")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        probes = [json.loads(line) for line in (self.root / "probe.jsonl").read_text().splitlines()]
+        self.assertEqual(probes, [{'link': True, 'deps': True}] * 2)
+
+    def test_agent_changing_the_config_stops_the_run(self):
+        self.configure(gate=["true"])
+        result = self.run_script(mode='edit-config')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Agent modified', result.stderr)
+        self.assertIn('ticket-runner.json', result.stderr)
+
+    def test_ticket_touching_the_config_is_not_integrated(self):
+        self.configure(gate=["true"])
+        result = self.run_script(mode='commit-config')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.state()['209']['status'], 'needs-human')
+        self.assertIn('protected files (.agents/ticket-runner.json)', self.state()['209']['reason'])
+
+    def test_prompts_are_project_agnostic_and_point_at_agents_md(self):
+        self.plan_osmani()
+        self.assertEqual(self.run_osmani().returncode, 0)
+        prompts = [self.prompt(c) for c in self.calls()]
+        for prompt in prompts:
+            for word in ('BVN', 'bureau', 'statement', 'Mongo', '/v1', 'model-governance', 'PebbleScore'):
+                self.assertNotIn(word, prompt)
+        self.assertIn('AGENTS.md has no `## Ticket Runner` section, so use general judgement', prompts[0])
+        (self.root / "AGENTS.md").write_text("# Agents\n\n## Ticket Runner\n- Personal data: emails\n")
+        self.git("commit", "-qam", "Runner notes")
+        self.issues.append({"number": 211, "title": "Third", "body": planned("Third slice"), "state": "OPEN"})
+        self.assertEqual(self.run_osmani().returncode, 0)
+        self.assertIn('The `## Ticket Runner` section of AGENTS.md lists', self.prompt(self.calls()[-3]))
 
 
 if __name__ == '__main__':
