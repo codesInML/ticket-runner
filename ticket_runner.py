@@ -53,10 +53,17 @@ EFFORTS = {
 WORKFLOWS = ("pocock", "osmani")
 # Osmani skills the runner names in its prompts. Each links ../../references/*.md, which the
 # skills installer leaves out; the preflight refuses to run while any of those files is missing.
-OSMANI_SKILLS = ("incremental-implementation", "test-driven-development", "code-simplification",
-                 "security-and-hardening", "api-and-interface-design", "debugging-and-error-recovery",
-                 "performance-optimization", "doubt-driven-development", "code-review-and-quality",
-                 "git-workflow-and-versioning")
+# Skills each stage's prompts name.
+IMPLEMENT_SKILLS = ("incremental-implementation", "test-driven-development", "code-simplification",
+                    "security-and-hardening", "api-and-interface-design", "performance-optimization",
+                    "frontend-ui-engineering", "observability-and-instrumentation", "documentation-and-adrs",
+                    "deprecation-and-migration", "ci-cd-and-automation", "debugging-and-error-recovery",
+                    "doubt-driven-development")
+TICKET_REVIEW_SKILLS = ("code-review-and-quality", "security-and-hardening", "performance-optimization",
+                        "api-and-interface-design")
+INTEGRATION_SKILLS = ("git-workflow-and-versioning", "debugging-and-error-recovery")
+EPIC_REVIEW_SKILLS = ("code-review-and-quality", "security-and-hardening", "performance-optimization")
+OSMANI_SKILLS = tuple(dict.fromkeys(IMPLEMENT_SKILLS + TICKET_REVIEW_SKILLS + INTEGRATION_SKILLS + EPIC_REVIEW_SKILLS))
 OSMANI_SOURCE = "https://github.com/addyosmani/agent-skills.git"
 RETRYABLE = {"turn-cap", "provider-error", "interrupted", "in-progress", "error"}
 # Optional project config, relative to the project root. Every key is optional; these are the defaults.
@@ -1145,10 +1152,17 @@ section without expanding scope. {self.domain()}Load a conditional skill only wh
 - {s('security-and-hardening')}: auth, untrusted input, or personal or sensitive data
 - {s('api-and-interface-design')}: a public contract or module interface changes
 - {s('performance-optimization')}: the ticket touches a performance-sensitive area
+- {s('frontend-ui-engineering')}: the ticket builds or changes user interface
+- {s('observability-and-instrumentation')}: a new critical path, background job or queue
+- {s('documentation-and-adrs')}: a public interface changes, or you make a decision a future reader would question
+- {s('deprecation-and-migration')}: removing or renaming anything public, or a schema or data migration
+- {s('ci-cd-and-automation')}: CI, Docker or build configuration changes
 - {s('debugging-and-error-recovery')}: a test or build breaks for a reason you do not yet understand
 - {s('doubt-driven-development')}: only for claims a test cannot pin down (invariants, cross-module
   contracts, migrations, anything irreversible). One doubt cycle per claim in this unattended run; a
   claim that still has substantive findings after it is a reason to stop with STATUS=NEEDS_HUMAN.
+Remove zombie code (dead, unreachable or unused code) only inside files this ticket already changes;
+leave it everywhere else, and the ticket reviewer records it as DEFERRED.
 Do not review your own work: a separate ticket reviewer reviews this ticket once you finish.
 Run typechecking, the ticket's focused tests, and the full suite once before finishing.
 Nobody can answer questions during this run. Decide and record anything that does not change what an
@@ -1196,7 +1210,8 @@ heading and raise each wrong one as a finding.
 ## BLOCKING: real defects this ticket owns, and every UNMET criterion. A pre-existing defect is BLOCKING
 when this ticket's change depends on it or makes it worse.
 ## DEFERRED: real defects this ticket neither caused, depends on, nor worsened: pre-existing code, or
-another ticket's job (name it when you know it). Write "None." when there are none.
+another ticket's job (name it when you know it). Zombie code (dead, unreachable or unused code) outside
+the files this ticket changes is DEFERRED, never BLOCKING. Write "None." when there are none.
 ## REJECTED: findings you considered and dismissed (style, taste, a misread), one line each.
 Read-only review: do not edit files, commit, change branches, push, or post comments.
 Use only CommandCode for agent work; do not invoke codex or claude CLIs.

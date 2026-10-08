@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -11,7 +12,8 @@ RUNNER = Path(__file__).resolve().parents[1]
 OSMANI_SKILLS = ("incremental-implementation", "test-driven-development", "code-simplification",
                  "security-and-hardening", "api-and-interface-design", "debugging-and-error-recovery",
                  "performance-optimization", "doubt-driven-development", "code-review-and-quality",
-                 "git-workflow-and-versioning")
+                 "git-workflow-and-versioning", "frontend-ui-engineering", "observability-and-instrumentation",
+                 "documentation-and-adrs", "deprecation-and-migration", "ci-cd-and-automation")
 
 
 def planned(body, blocked_by=""):
@@ -274,6 +276,11 @@ sys.exit(8 if cap else 0)
         self.assertIn(str(self.skills / 'incremental-implementation' / 'SKILL.md'), implement)
         self.assertIn('Do not review your own work', implement)
         self.assertIn('ASSUMPTIONS', implement)
+        for name in ('frontend-ui-engineering', 'observability-and-instrumentation', 'documentation-and-adrs',
+                     'deprecation-and-migration', 'ci-cd-and-automation'):
+            self.assertIn(str(self.skills / name / 'SKILL.md'), implement)
+        self.assertIn('zombie code', implement)
+        self.assertIn('outside\nthe files this ticket changes is DEFERRED', self.prompt(calls[1]))
         self.assertIn('old bug in b.ts:2', (self.root / '.scratch/run-tickets-commandcode/207/209/review/round-1/final.txt').read_text())
         self.assertIn('209/review/round-1/final.txt', self.prompt(calls[-1]))
         state = self.state()
@@ -364,6 +371,13 @@ sys.exit(8 if cap else 0)
         self.assertIn('definition-of-done.md (linked from', result.stderr)
         self.assertIn('sparse-checkout set references', result.stderr)
         self.assertFalse((self.root / 'agents.log').exists())
+
+    def test_osmani_refuses_while_a_new_implementer_skill_is_missing(self):
+        self.plan_osmani()
+        shutil.rmtree(self.skills / "deprecation-and-migration")
+        result = self.run_osmani('--dry-run')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('deprecation-and-migration/SKILL.md', result.stderr)
 
     def test_workflow_switch_is_refused_while_a_ticket_is_part_way(self):
         self.plan_osmani()
