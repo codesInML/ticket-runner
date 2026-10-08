@@ -263,7 +263,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.state()['210']['status'], 'done')
         self.assertEqual(self.state()['_review']['status'], 'ship')
         self.assertEqual(self.run_script('--resume').returncode, 0)
-        self.assertEqual(len(self.calls()), 5)  # Resume skips implementation.
+        self.assertEqual(len(self.calls()), 4)  # Every stage still holds for this head.
 
     def check_cap_resume(self, mode):
         failed = self.run_script(mode=mode)
@@ -770,6 +770,8 @@ sys.exit(8 if cap else 0)
         self.assertIn('never force-pushes', self.state()['_ship']['reason'])
         self.assertEqual(self.remote_head(), foreign)
         self.assertFalse((self.root / 'prs.json').exists())
+        self.assertEqual(self.run_script('--final-only').returncode, 1)
+        self.assertEqual(self.kinds().count('launch plan'), 1)  # The plan for this head is kept.
 
     def test_merge_refusals(self):
         result = self.run_script('--merge', '--no-verify')
@@ -826,6 +828,73 @@ sys.exit(8 if cap else 0)
         resumed = self.call('launch plan')
         self.assertEqual(resumed[resumed.index('--resume')+1], 'plan-session')
         self.assertEqual(self.state()['_ship']['status'], 'pr-open')
+
+
+    # ── stage bookkeeping ────────────────────────────────────────────────
+
+    def test_stages_skip_while_valid_and_rerun_for_a_new_head(self):
+        self.configure(verify=["echo verified"])
+        self.assertEqual(self.run_script().returncode, 0)
+        result = self.run_script('--final-only')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.calls()), 4)
+        self.assertIn('Verify stage already passed', result.stdout)
+        self.assertIn('Epic review already said SHIP', result.stdout)
+        self.assertIn('already up to date', result.stdout)
+        first = self.state()
+        self.issues.append({"number": 211, "title": "Third slice", "body": "Parent #207", "state": "OPEN"})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'launch plan',
+                                        'implement', 'epic review', 'launch plan'])
+        head = self.git('rev-parse', 'HEAD')
+        state = self.state()
+        self.assertNotEqual(first['_verify']['head'], head)
+        self.assertEqual([state[k]['head'] for k in ('_verify', '_review', '_ship')], [head] * 3)
+
+    def test_a_verify_result_that_arrives_later_invalidates_an_unverified_review(self):
+        self.configure(verify=["true"])
+        self.assertEqual(self.run_script('--no-verify', '--no-ship').returncode, 0)
+        self.assertIsNone(self.state()['_review']['verified'])
+        self.assertEqual(self.run_script('--final-only', '--no-ship').returncode, 0)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review'])
+        self.assertEqual(self.state()['_review']['verified'], self.git('rev-parse', 'HEAD'))
+
+    def test_skip_flag_combinations(self):
+        result = self.run_script('--final-only', '--no-verify', '--no-final-review')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('leaves nothing to run', result.stderr)
+        self.configure(verify=["true"])
+        self.assertEqual(self.run_script('--no-final-review').returncode, 0)
+        self.assertEqual(self.kinds(), ['implement', 'implement'])
+        self.assertEqual(self.state()['_verify']['status'], 'pass')
+        self.assertNotIn('_ship', self.state())
+
+    def test_dry_run_lists_the_stages(self):
+        self.configure(verify=["true", "true"], prBase="master")
+        result = self.run_script('--dry-run', '--merge')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for line in ('tickets      2 to run', 'verify       2 command(s); runtime checks off (no serve)',
+                     'epic review  claude-sonnet-5-5',
+                     'ship         launch plan, push, pull request into master; then --merge (merge)'):
+            self.assertIn(line, result.stdout)
+        result = self.run_script('--dry-run', '--no-verify', '--no-ship')
+        self.assertIn('verify       skipped (--no-verify)', result.stdout)
+        self.assertIn('ship         skipped (--no-ship)', result.stdout)
+        self.assertIn('verify, epic review, ship: skipped (--only)', self.run_script('--dry-run', '--only', '209').stdout)
+
+    def test_pocock_checks_the_skills_of_its_enabled_stages(self):
+        shutil.rmtree(self.skills / "shipping-and-launch")
+        result = self.run_script('--dry-run')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('shipping-and-launch/SKILL.md', result.stderr)
+        self.assertEqual(self.run_script('--dry-run', '--no-ship').returncode, 0)
+        shutil.rmtree(self.skills / "debugging-and-error-recovery")
+        self.assertEqual(self.run_script('--dry-run', '--no-ship').returncode, 0)  # Verify has nothing to run.
+        self.configure(verify=["true"])
+        result = self.run_script('--dry-run', '--no-ship')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('debugging-and-error-recovery/SKILL.md', result.stderr)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parallel GitHub ticket implementation and one epic review via CommandCode.
+"""Parallel GitHub ticket implementation, then verify, epic review and ship stages, via CommandCode.
 
 Every unblocked ticket runs in its own git worktree (.scratch/worktrees/<n>) on
 branch cc/<parent>/<n>, cut from the epic tip when it starts; up to --jobs run
@@ -8,7 +8,17 @@ run the gate when the tip moved, fast-forward the epic branch, then remove the
 worktree and branch. A rebase conflict or gate failure resumes the ticket's own
 session once; if that does not fix it the ticket needs a human. A failed ticket
 holds back only the tickets that depend on it. Once every ticket has merged, the
-epic review reads the whole epic diff once.
+post-ticket stages run in order, each skipped while its result still holds for the
+epic head (a new epic commit invalidates the stages after it):
+  verify       the project's verify commands in a worktree at the epic tip, then, when the
+               config sets serve, the app started with serveEnv and a read-only verifier that
+               marks each Verification item and checkpoint VERIFIED, FAILED or UNVERIFIABLE.
+               A failure gets one repair agent, the gate, and the whole stage again; a pass
+               fast-forwards the epic branch to any repair commits.
+  epic review  reads the whole epic diff once, with the verify report as evidence.
+  ship         on a SHIP verdict: a launch plan, a push of the epic branch (never forced),
+               and a pull request whose body the runner writes. --merge then waits for CI
+               and merges when green.
 
 A workflow names the skills each prompt follows:
   pocock  one implement skill (IMPLEMENT_SKILL) whose own code review runs in sub-agents.
@@ -17,6 +27,9 @@ A workflow names the skills each prompt follows:
           into BLOCKING, DEFERRED and REJECTED. BLOCKING findings get one fix round in the
           implementer's session, then a re-review by the same model; DEFERRED findings
           are consolidated by the epic review and posted once on the parent issue.
+In both workflows the verify repair follows debugging-and-error-recovery, the launch plan
+follows shipping-and-launch, and the verifier uses browser-testing-with-devtools when the
+project config turns the browser on.
 """
 
 import argparse
@@ -389,6 +402,42 @@ def stage_skills(a, cfg):
     return list(dict.fromkeys(names))
 
 
+def plan_stages(a, cfg, data, open_tickets, head):
+    """The stages a real run would go through, for --dry-run; a result still valid for HEAD is a skip."""
+    def held(key, ok):
+        rec = data.get(key, {})
+        return rec.get("head") == head and rec.get("status") in ok
+    lines = [paint("Stages:", BOLD)]
+    if a.final_only:
+        lines.append("  tickets      skipped (--final-only)")
+    else:
+        todo = [a.only] if a.only else open_tickets
+        lines.append(f"  tickets      {len(todo)} to run" + (f" (--only #{a.only})" if a.only else ""))
+    if a.only:
+        lines.append("  verify, epic review, ship: skipped (--only)")
+        return "\n".join(lines)
+    runtime = (f"runtime checks: {cfg['serve']}" + (" + browser" if cfg["browser"] else "")) if cfg["serve"] \
+        else "runtime checks off (no serve)"
+    lines.append("  verify       " + ("skipped (--no-verify)" if a.no_verify else
+                                      f"already passed at {head[:8]}; would skip" if held("_verify", ("pass",)) else
+                                      f"{len(cfg['verify'])} command(s); {runtime}"))
+    if a.no_final_review:
+        lines.append("  epic review  skipped (--no-final-review)")
+        lines.append("  ship         skipped (no epic review)")
+        return "\n".join(lines)
+    lines.append("  epic review  " + (f"already {data['_review']['status']} at {head[:8]}; would skip"
+                                      if held("_review", ("ship", "fix-first")) else f"{a.final_model}"))
+    if a.no_ship:
+        lines.append("  ship         skipped (--no-ship)")
+    else:
+        merge = f"; then --merge ({cfg['mergeMethod']}) once CI is green" if a.merge else ""
+        into = cfg["prBase"] or "origin's default branch"
+        lines.append("  ship         " + (f"pull request already open at {head[:8]}" if held("_ship", ("pr-open", "merged"))
+                                          else f"launch plan, push, pull request into {into}") + merge +
+                     " (only on a SHIP verdict)")
+    return "\n".join(lines)
+
+
 def read_env(path):
     """KEY=VALUE pairs of an env file, for the app's process only; values are never printed."""
     pairs = {}
@@ -443,9 +492,10 @@ def skill_problems(skills_dir, names):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+    p = argparse.ArgumentParser(prog="ticket-runner", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Model aliases: flash (default), flash-fast, muse, luna, glm.
-Full CommandCode model IDs also work. Sonnet 5.5 runs the epic review by default.
+Full CommandCode model IDs also work. Sonnet 5.5 runs the epic review and the launch
+plan by default; luna runs the verifier; verify repairs use the implementation model.
 Effort defaults: max for implementation (xhigh for Muse contributor), high for reviews.
 Ticket review (osmani only) alternates by ticket number over --ticket-review-model:
 even tickets get the first model, odd tickets the second; a re-review keeps its model.
@@ -455,7 +505,8 @@ Examples:
   ticket-runner 207 --jobs 2 --model muse
   ticket-runner 207 --resume --max-turns 1000
   ticket-runner 207 --only 209
-  ticket-runner 207 --final-only
+  ticket-runner 207 --final-only               (verify, epic review, ship)
+  ticket-runner 207 --final-only --merge
   ticket-runner-osmani 207 --dry-run       (same runner, --workflow osmani)
   ticket-runner-osmani 207 --ticket-review-model glm
 
@@ -484,6 +535,12 @@ and a ticket whose diff touches one is not integrated. AGENTS.md may carry a `##
 section naming the project's personal data, governed parameters, public contracts and
 performance-sensitive areas; the prompts point agents at it.
 
+Post-ticket stages: --final-only runs only them; --no-verify, --no-final-review and
+--no-ship skip one each. No epic review means no ship; --merge refuses unless verify ran
+and passed and the epic review said SHIP. --resume also continues an interrupted verifier,
+verify repair or launch plan session. A needs-human verify keeps .scratch/worktrees/verify
+(branch cc/<parent>/verify): fix it there, commit, then --final-only.
+
 Merged (done) and closed tickets are always skipped. --resume continues the saved
 CommandCode session of an unfinished ticket in its kept worktree, and retries
 integration of a ticket that finished but did not merge. Fix a needs-human ticket
@@ -495,8 +552,9 @@ in a "## Parent" section or a "Parent…: #N" line. Blockers are the union of na
 prose that just says "blocked by" counts for nothing.
 State/logs: .scratch/run-tickets-commandcode/<parent>/
 Worktrees:  .scratch/worktrees/<n> on branch cc/<parent>/<n>
-Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (osmani, default
+Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (default
      ~/.agents/skills), IMPL_MODEL, IMPL_EFFORT, IMPL_MAX_TURNS, IMPL_JOBS,
+     VERIFY_MODEL, VERIFY_EFFORT, VERIFY_MAX_TURNS (the verifier),
      TICKET_REVIEW_MODEL, TICKET_REVIEW_EFFORT, TICKET_REVIEW_MAX_TURNS,
      FINAL_MODEL, FINAL_EFFORT, FINAL_MAX_TURNS (the epic review),
      GATE_CMDS and INSTALL_CMD (override the config's gate and install).
@@ -538,6 +596,8 @@ Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (osma
     a = p.parse_args()
     if a.final_only and a.only:
         p.error("--final-only cannot be combined with --only")
+    if a.final_only and a.no_verify and a.no_final_review:
+        p.error("--final-only with --no-verify and --no-final-review leaves nothing to run")
     if a.merge and (a.only or a.no_verify or a.no_final_review or a.no_ship):
         p.error("--merge needs the verify stage, the epic review and the ship stage: drop --only, --no-verify, "
                 "--no-final-review and --no-ship")
@@ -733,6 +793,7 @@ def main():
     if a.dry_run:
         done = {n for n in order if tickets[n]["state"] == "CLOSED" or data.get(str(n), {}).get("status") == "done"}
         say(render_graph(levels, tickets, classify({n: t["blockers"] for n, t in tickets.items()}, done)))
+        say(plan_stages(a, cfg, data, [n for n in order if n not in done], command("git", "rev-parse", "HEAD")))
         say("Dry run: no agents, file writes or GitHub edits.", DIM)
         for item in refusals:
             say(f"A real run would refuse: {item}", RED, err=True)
@@ -1837,6 +1898,18 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
 
     # ── epic review ────────────────────────────────────────────────────────
 
+    def evidence(self, head):
+        """The verify head the epic review saw: the head itself when verify passed there, else None."""
+        verify = self.data.get("_verify", {})
+        return head if not self.a.no_verify and verify.get("status") == "pass" and verify.get("head") == head \
+            else None
+
+    def review_valid(self, review, head):
+        # A verdict holds for its head, workflow and evidence; with verify skipped now, any evidence will do.
+        return review.get("status") in ("ship", "fix-first") and review.get("head") == head and \
+            review.get("workflow") == self.a.workflow and \
+            (self.a.no_verify or review.get("verified") == self.evidence(head))
+
     def review(self):
         a = self.a
         if dirty(self.root):
@@ -1844,8 +1917,13 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
         base = self.data["_meta"]["epicBase"]
         head = git(self.root, "rev-parse", "HEAD")
         review = self.data.setdefault("_review", {})
+        if self.review_valid(review, head):
+            say(f"Epic review already said {review['status'].upper()} at {head[:8]}; skipping. "
+                f"Report: {self.folder / 'review/final.txt'}", GREEN if review["status"] == "ship" else RED, BOLD)
+            return 0 if review["status"] == "ship" else 1
         session = review.get("sessionId") if a.resume and review.get("status") in RETRYABLE and review.get("head") == head else None
-        self.update(review, status="in-progress", head=head, drop=() if session else ("sessionId",))
+        self.update(review, status="in-progress", head=head, workflow=a.workflow, verified=self.evidence(head),
+                    drop=() if session else ("sessionId",))
         say(f"\n━━ Epic review of #{a.parent} with {a.final_model} ━━", BOLD, BLUE)
         checks = self.epic_brief() if self.osmani else """Check integration between slices, every parent requirement (MET/UNMET with evidence),
 and real correctness/security defects. Cite file and line for each actionable finding.
@@ -1940,6 +2018,9 @@ Use only CommandCode for agent work.
     def launch_plan(self, rec, head, verified):
         a, sdir = self.a, self.folder / "ship"
         plan = rec.setdefault("plan", {})
+        if plan.get("status") == "done" and plan.get("head") == head and (sdir / "launch-plan.md").exists():
+            say(f"Launch plan already written for {head[:8]}: {os.path.relpath(sdir / 'launch-plan.md')}", DIM)
+            return True
         session = plan.get("sessionId") if a.resume and plan.get("status") in RETRYABLE \
             and plan.get("head") == head else None
         self.update(plan, drop=() if session else ("sessionId",))
