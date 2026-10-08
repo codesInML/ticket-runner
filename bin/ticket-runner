@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Parallel GitHub ticket runner on CommandCode. See --help.
+set -euo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"; [[ $src == /* ]] || src="$dir/$src"
+done
+exec python3 "$(cd -P "$(dirname "$src")" && pwd)/../ticket_runner.py" "$@"
