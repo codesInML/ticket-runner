@@ -193,6 +193,15 @@ def dirty(cwd):
     return bool(git(cwd, "status", "--porcelain"))
 
 
+def edited(cwd):
+    """Changes to tracked files: what the app under test writes (logs, pids, uploads) is untracked."""
+    return bool(git(cwd, "status", "--porcelain", "--untracked-files=no"))
+
+
+def untracked(cwd):
+    return set(git(cwd, "ls-files", "--others", "--exclude-standard").splitlines())
+
+
 def rebasing(cwd):
     return any(Path(cwd, git(cwd, "rev-parse", "--git-path", d)).exists() for d in ("rebase-merge", "rebase-apply"))
 
@@ -436,6 +445,15 @@ def plan_stages(a, cfg, data, open_tickets, head):
                                           else f"launch plan, push, pull request into {into}") + merge +
                      " (only on a SHIP verdict)")
     return "\n".join(lines)
+
+
+def probe(cmd, cwd, env):
+    """One run of the `ready` command; a hung probe counts as not ready."""
+    try:
+        return subprocess.run(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=30).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def read_env(path):
@@ -1275,7 +1293,7 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
         if self.notes:
             return ("The `## Ticket Runner` section of AGENTS.md lists what this project counts as personal or "
                     "sensitive data,\ngoverned parameters, public contracts and performance-sensitive areas; "
-                    "use it for the triggers below.\n")
+                    "use it wherever this prompt names them.\n")
         return ("AGENTS.md has no `## Ticket Runner` section, so use general judgement for what counts as personal "
                 "or\nsensitive data, a governed parameter, a public contract or a performance-sensitive area.\n")
 
@@ -1683,7 +1701,7 @@ or modify the runner or {self.hands_off}.
         resuming = self.a.resume and rec.get("phase") == "repair" and \
             rec.get("repair", {}).get("status") in RETRYABLE
         problem = (f"{os.path.relpath(wt)} is mid-rebase" if rebasing(wt) else
-                   f"{os.path.relpath(wt)} has uncommitted changes" if dirty(wt) and not resuming else
+                   f"{os.path.relpath(wt)} has uncommitted changes" if edited(wt) and not resuming else
                    self.check_worktree(wt, branch))
         if not problem and attempt(wt, "merge-base", "--is-ancestor", tip, "HEAD").returncode:
             if attempt(wt, "merge-base", "--is-ancestor", "HEAD", tip).returncode:
@@ -1735,8 +1753,7 @@ or modify the runner or {self.hands_off}.
             app = self.spawn_child(cfg["serve"], shell=True, cwd=wt, env=env, stdout=out, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + cfg["readyTimeout"]
-            while subprocess.run(cfg["ready"], shell=True, cwd=wt, env=env, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL).returncode:
+            while not probe(cfg["ready"], wt, env):
                 if app.poll() is not None:
                     return {"status": "fail", "reason": f"the app exited ({app.returncode}) before `ready` "
                             f"succeeded; see {log}"}
@@ -1756,7 +1773,7 @@ or modify the runner or {self.hands_off}.
                                   tag="verify", extra=extra)
             self.guard()
             self.update(rec, phase=None)
-            if dirty(wt) or git(wt, "rev-parse", "HEAD") != head or self.check_worktree(wt, self.verify_branch()):
+            if edited(wt) or git(wt, "rev-parse", "HEAD") != head or self.check_worktree(wt, self.verify_branch()):
                 return {"status": "stuck", "reason": f"the verifier changed {os.path.relpath(wt)}, but it must "
                         "be read-only; inspect the worktree, then --final-only"}
             if check["status"] != "reported":
@@ -1765,7 +1782,9 @@ or modify the runner or {self.hands_off}.
             result = verdict(text, r"VERIFY=(PASS|FAIL)")
             if result == "MISSING":
                 return {"status": "stuck", "reason": f"the verifier gave no VERIFY= line; see {vdir / 'check'}"}
-            counts = {k: len(re.findall(rf"\b{k}\b", text)) for k in ("VERIFIED", "FAILED", "UNVERIFIABLE")}
+            # One line per check, led by its result; prose that mentions a result word does not count.
+            counts = {k: len(re.findall(rf"^[\s>*_|-]*(?:\d+[.)]\s*)?\**{k}\b", text, re.M))
+                      for k in ("VERIFIED", "FAILED", "UNVERIFIABLE")}
             return {"status": result.lower(), "report": str(vdir / "check" / "final.txt"), "counts": counts,
                     "text": text}
         finally:
@@ -1831,17 +1850,19 @@ what a ticket asked for), commit buildable work, explain, and end with STATUS=NE
 End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKED.
 """
         self.update(rep, drop=() if session else ("sessionId",))
+        before = untracked(wt)  # The app's leftovers; a file the repair adds but never commits is not.
         text = self.run_agent(self.a.model, self.a.effort, self.a.max_turns, prompt, vdir / "repair", rep,
                               session, cwd=wt, tag="verify repair", color=YELLOW)
         self.guard()
+        left = edited(wt) or bool(untracked(wt) - before)
         if rep["status"] != "reported":
-            self.epic_fail(rec, rep["status"] if not dirty(wt) else "needs-human",
+            self.epic_fail(rec, rep["status"] if not left else "needs-human",
                            f"the verify repair ended {rep['status']}; work kept in {os.path.relpath(wt)}; "
                            "--resume --final-only continues it")
             return False
         self.update(rec, repaired=True)
         status = verdict(text)
-        problem = ("a rebase is in progress" if rebasing(wt) else "uncommitted changes remain" if dirty(wt)
+        problem = ("a rebase is in progress" if rebasing(wt) else "uncommitted changes remain" if left
                    else self.check_worktree(wt, branch))
         if status != "COMPLETE" or problem:
             self.update(rec, phase=None)

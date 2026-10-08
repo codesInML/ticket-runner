@@ -657,6 +657,23 @@ sys.exit(8 if cap else 0)
         self.assertIn('FAILED runtime checks', self.prompt(self.calls()[3]))
         self.assertTrue((self.root / 'fixed.txt').exists())
 
+    def test_an_app_that_never_gets_ready_is_repaired_once_then_needs_a_human(self):
+        (self.root / ".env.verify").write_text("PORT=1\n")
+        with (self.root / ".gitignore").open("a") as f:
+            f.write(".env.verify\n")
+        self.git("add", ".gitignore")
+        self.configure(serve="sleep 300 & echo $! > app.pid; wait", ready="false", readyTimeout=1,
+                       serveEnv=".env.verify", gate=["true"])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair'])
+        self.assertIn('The app did not start for the runtime checks', self.prompt(self.call('repair')))
+        self.assertEqual(self.state()['_verify']['status'], 'needs-human')
+        self.assertIn('still fails after one repair', self.state()['_verify']['reason'])
+        pid = int((self.root / '.scratch/worktrees/verify/app.pid').read_text())
+        with self.assertRaises(ProcessLookupError):  # The whole process group was stopped.
+            os.kill(pid, 0)
+
     def test_runtime_checks_refuse_without_a_separate_serve_env(self):
         (self.root / ".env").write_text("SECRET=1\n")
         for config, expected in [({}, "sets serve but no serveEnv"),
