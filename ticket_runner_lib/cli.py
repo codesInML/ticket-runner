@@ -3,7 +3,7 @@
 Every unblocked ticket runs in its own git worktree (.scratch/worktrees/<n>) on
 branch cc/<parent>/<n>, cut from the epic tip when it starts; up to --jobs run
 at once. Finished tickets integrate one at a time: rebase onto the epic tip,
-run the gate when the tip moved, fast-forward the epic branch, then remove the
+run the gate before every integration, fast-forward the epic branch, then remove the
 worktree and branch. A rebase conflict or gate failure resumes the ticket's own
 session once; if that does not fix it the ticket needs a human. A failed ticket
 holds back only the tickets that depend on it. Once every ticket has merged, the
@@ -94,7 +94,7 @@ Project config (.agents/ticket-runner.json, optional JSON; every key optional):
   lockfiles       ["package-lock.json"]
   dependencyDirs  ["node_modules"]    cloned copy-on-write into each worktree
   linkFiles       [".env"]            symlinked into each worktree
-  gate            ["npx tsc --noEmit", "npm test"]   run after a rebase onto a moved epic tip
+  gate            ["npx tsc --noEmit", "npm test"]   run before every ticket integration
   prBase, mergeMethod, verify, serve, ready, readyTimeout, serveEnv, browser
 The config, AGENTS.md, linkFiles and serveEnv are protected: an agent changing one stops the run,
 and a ticket whose diff touches one is not integrated. AGENTS.md may carry a `## Ticket Runner`
@@ -201,8 +201,25 @@ def main():
     a = parse_args()
     root = Path(command("git", "rev-parse", "--show-toplevel"))
     os.chdir(root)
-    cfg = load_config(root)
     folder = root / ".scratch" / "run-tickets-commandcode" / str(a.parent)
+    if a.dry_run:
+        return run_checkout(a, root, folder)
+    # Acquire before reading state, discovery, or branch validation. An invocation
+    # must never execute a snapshot observed before another runner completed.
+    folder.mkdir(parents=True, exist_ok=True)
+    ignore = root / ".scratch/.gitignore"
+    if not ignore.exists():
+        ignore.write_text("*\n")
+    with (folder.parent / ".lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Another ticket runner is active in this checkout")
+        return run_checkout(a, root, folder)
+
+
+def run_checkout(a, root, folder):
+    cfg = load_config(root)
     path = folder / "state.json"
     data = json.loads(path.read_text()) if path.exists() else {}
     tickets, levels = discover(a.parent)
@@ -280,17 +297,7 @@ def main():
     skill = Path(os.getenv("IMPLEMENT_SKILL", str(Path.home() / ".agents/skills/implement/SKILL.md")))
     if not osmani and not a.final_only and not skill.is_file():
         raise RuntimeError(f"Implementation skill not found: {skill}")
-    folder.mkdir(parents=True, exist_ok=True)
-    ignore = root / ".scratch/.gitignore"
-    if not ignore.exists():
-        ignore.write_text("*\n")
-    # One runner per checkout: different epics must not race the main worktree.
-    with (folder.parent / ".lock").open("w") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RuntimeError("Another ticket runner is active in this checkout")
-        return Runner(a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg).execute()
+    return Runner(a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg).execute()
 
 
 def entrypoint():

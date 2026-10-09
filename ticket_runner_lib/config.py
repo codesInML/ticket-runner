@@ -134,13 +134,13 @@ def plan_stages(a, cfg, data, open_tickets, head):
     runtime = (f"runtime checks: {cfg['serve']}" + (" + browser" if cfg["browser"] else "")) if cfg["serve"] \
         else "runtime checks off (no serve)"
     lines.append("  verify       " + ("skipped (--no-verify)" if a.no_verify else
-                                      f"already passed at {head[:8]}; would skip" if held("_verify", ("pass",)) else
+                                      f"cached pass at {head[:8]}; inputs rechecked before skipping" if held("_verify", ("pass",)) else
                                       f"{len(cfg['verify'])} command(s); {runtime}"))
     if a.no_final_review:
         lines.append("  epic review  skipped (--no-final-review)")
         lines.append("  ship         skipped (no epic review)")
         return "\n".join(lines)
-    lines.append("  epic review  " + (f"already {data['_review']['status']} at {head[:8]}; would skip"
+    lines.append("  epic review  " + (f"cached {data['_review']['status']} at {head[:8]}; evidence rechecked before skipping"
                                       if held("_review", ("ship", "fix-first")) else f"{a.final_model}"))
     if a.no_ship:
         lines.append("  ship         skipped (--no-ship)")

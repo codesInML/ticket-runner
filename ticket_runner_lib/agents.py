@@ -97,6 +97,7 @@ class AgentProcesses:
             try:
                 rc = child.wait()
             finally:
+                kill(child)
                 self.reap(child)
         if self.stopping.is_set():
             raise Stop()

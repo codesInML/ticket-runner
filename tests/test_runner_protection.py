@@ -10,6 +10,15 @@ from ticket_runner_lib.settings import DEFAULTS, Fatal
 
 
 class RunnerProtectionTests(unittest.TestCase):
+    def test_runner_files_inside_target_repository_are_protected_in_commits(self):
+        root = Path(__file__).resolve().parents[1]
+        runner = Runner(SimpleNamespace(workflow="pocock", parent=207), root, root,
+                        root / "state.json", {"_meta": {"branch": "test"}}, {}, [],
+                        root / "SKILL.md", root, DEFAULTS)
+        self.assertIn("ticket_runner.py", runner.protected)
+        self.assertIn("ticket_runner_lib/verification.py", runner.protected)
+        self.assertIn("bin/ticket-runner", runner.protected)
+
     def test_agent_editing_an_extracted_module_stops_the_runner(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

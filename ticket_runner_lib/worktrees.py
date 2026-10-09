@@ -72,10 +72,10 @@ class WorktreeIntegration:
         if problem:
             return self.fail(n, record, "needs-human", problem)
         tip = git(self.root, "rev-parse", self.epic)
+        repaired = False
         if attempt(wt, "merge-base", "--is-ancestor", tip, "HEAD").returncode:
             say(f"#{n} rebasing onto {self.epic} {tip[:8]}", BOLD, color)
             before = git(wt, "rev-parse", "HEAD")
-            repaired = False
             if attempt(wt, "rebase", tip).returncode:
                 conflicts = git(wt, "diff", "--name-only", "--diff-filter=U") or "(see git status)"
                 say(f"#{n} rebase conflicted in {', '.join(conflicts.split())}; handing back to its agent",
@@ -97,12 +97,12 @@ the runner or {self.hands_off}.
                 say(f"#{n} a lockfile changed under it; running {self.install_cmd} in its worktree", BOLD, color)
                 if self.shell(self.install_cmd, wt, log):
                     return self.fail(n, record, "needs-human", f"{self.install_cmd} failed in the worktree; see {log}")
-            passed, log = self.gate(n, wt, tdir)
-            if not passed and repaired:
-                return self.fail(n, record, "needs-human", f"gate failed after the conflict repair; see {log}")
-            if not passed:
-                tail = "\n".join(log.read_text(errors="replace").splitlines()[-120:])
-                if not self.repair(n, record, tdir, tip, f"""The runner rebased {branch} onto the epic tip {tip} cleanly, but the integration gate failed:
+        passed, log = self.gate(n, wt, tdir)
+        if not passed and repaired:
+            return self.fail(n, record, "needs-human", f"gate failed after the conflict repair; see {log}")
+        if not passed:
+            tail = "\n".join(log.read_text(errors="replace").splitlines()[-120:])
+            if not self.repair(n, record, tdir, tip, f"""The runner is integrating {branch} onto epic tip {tip}, but the integration gate failed:
   $ {self.gate_cmd}
 Last lines of output (full log: {log}):
 ```
@@ -113,16 +113,19 @@ command, and commit the fix on {branch} referencing #{n}. Do not rebase, merge, 
 or modify the runner or {self.hands_off}.
 {self.repair_guidance('gate')}End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKED.
 """):
-                    return
-                passed, log = self.gate(n, wt, tdir)
-                if not passed:
-                    return self.fail(n, record, "needs-human", f"gate still fails after one repair; see {log}")
+                return
+            passed, log = self.gate(n, wt, tdir)
+            if not passed:
+                return self.fail(n, record, "needs-human", f"gate still fails after one repair; see {log}")
+        if dirty(wt) or self.check_worktree(wt, branch):
+            return self.fail(n, record, "needs-human", "integration gate changed the worktree; inspect it before resuming")
         touched = git(wt, "diff", "--name-only", tip, "HEAD", "--", *self.protected) if self.protected else ""
         if touched:
             return self.fail(n, record, "needs-human", f"the ticket changed protected files ({', '.join(touched.split())}); "
                              "revert those commits, then --resume")
         self.check_main()
         git(self.root, "merge", "-q", "--ff-only", branch)
+        self.guard()
         head = git(self.root, "rev-parse", "HEAD")
         self.update(record, status="done", head=head, drop=("reason",))
         self.label(n, "agent-done", "in-progress")
@@ -180,7 +183,10 @@ or modify the runner or {self.hands_off}.
     def gate(self, n, wt, tdir):
         log = self.log(tdir, "gate")
         say(f"#{n} gate: {self.gate_cmd}", BOLD, self.color(n))
+        head = git(wt, "rev-parse", "HEAD")
         rc = self.shell(self.gate_cmd, wt, log)
+        if git(wt, "rev-parse", "HEAD") != head:
+            raise Fatal(f"Integration gate changed HEAD in {wt}; inspect it before resuming")
         say(f"#{n} gate {'passed' if rc == 0 else 'failed'} ({os.path.relpath(log)})",
             BOLD, GREEN if rc == 0 else RED)
         return rc == 0, log

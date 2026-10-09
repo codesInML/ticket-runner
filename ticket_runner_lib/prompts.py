@@ -95,8 +95,8 @@ Read AGENTS.md, then exercise every check in {self.checks_file()} against the ru
 `## Verification` items (above all its Manual checks) and the parent issue's checkpoints. The runner
 already ran the build and test commands; verify behavior by doing (call the endpoint, run the command,
 inspect the output), not by reading code or re-running the test suite.
-{browser}Report under `## RESULTS`, one line per check: VERIFIED, FAILED or UNVERIFIABLE, then the evidence: the
-exact command and the output that decides it. UNVERIFIABLE means this running app cannot exercise the
+{browser}Report under `## RESULTS`, one line per check ID: VERIFIED C001, FAILED C001 or UNVERIFIABLE C001, then the evidence: the
+exact command and the output that decides it. Use the IDs from checks.md, each exactly once. UNVERIFIABLE means this running app cannot exercise the
 check (it needs production data, a third party, or a human judgement); say why. A check you could run
 but did not is not UNVERIFIABLE.
 Read-only: do not edit files, commit, change branches, push, or post comments; stop only processes you started.

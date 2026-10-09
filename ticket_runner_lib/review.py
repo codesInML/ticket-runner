@@ -96,9 +96,9 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
         return True
 
     def evidence(self, head):
-        """The verify head the epic review saw: the head itself when verify passed there, else None."""
+        """The input fingerprint of passing verification at this head, otherwise None."""
         verify = self.data.get("_verify", {})
-        return head if not self.a.no_verify and verify.get("status") == "pass" and verify.get("head") == head \
+        return verify.get("fingerprint") if not self.a.no_verify and verify.get("status") == "pass" and verify.get("head") == head \
             else None
 
     def review_valid(self, review, head):

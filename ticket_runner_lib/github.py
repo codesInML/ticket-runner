@@ -82,7 +82,8 @@ def native_links(parent, numbers):
     if children["totalCount"] > len(children["nodes"]):
         raise RuntimeError(f"#{parent} has more than 100 sub-issues; split the epic before running")
     edges = {int(key[1:]): node["blockedBy"] for key, node in repo.items() if re.fullmatch(r"i\d+", key)}
-    edges.update({c["number"]: c["blockedBy"] for c in children["nodes"]})
+    edges.update({c["number"]: c["blockedBy"] for c in children["nodes"]
+                  if c["repository"]["nameWithOwner"] == repo["nameWithOwner"]})
     for n, linked in edges.items():
         if linked["totalCount"] > len(linked["nodes"]):
             raise RuntimeError(f"#{n} has more than 100 blocked-by links; trim them before running")

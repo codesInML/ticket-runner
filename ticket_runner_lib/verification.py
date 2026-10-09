@@ -2,6 +2,8 @@
 
 from pathlib import Path
 import os
+import hashlib
+import json
 import re
 import subprocess
 import time
@@ -9,7 +11,7 @@ import time
 from .display import say
 from .processes import attempt, edited, git, kill, probe, read_env, rebasing, untracked
 from .settings import BLUE, BOLD, BROWSER_TOOLS, CONFIG, DIM, Fatal, GREEN, RED, RETRYABLE, YELLOW
-from .text import section, verdict
+from .text import nested_sections, section, verdict
 
 
 class Verification:
@@ -17,12 +19,13 @@ class Verification:
         rec = self.data.setdefault("_verify", {})
         tip = git(self.root, "rev-parse", self.epic)
         vdir = self.folder / "verify"
-        if rec.get("status") == "pass" and rec.get("head") == tip:
+        fingerprint = self.verify_fingerprint(tip)
+        if rec.get("status") == "pass" and rec.get("head") == tip and rec.get("fingerprint") == fingerprint:
             say(f"Verify stage already passed at {tip[:8]}; skipping", DIM)
             return 0
         vdir.mkdir(parents=True, exist_ok=True)
         if not self.cfg["verify"] and not self.cfg["serve"]:
-            self.update(rec, status="pass", head=tip, ran=False, drop=("reason", "phase"))
+            self.update(rec, status="pass", head=tip, fingerprint=fingerprint, ran=False, drop=("reason", "phase"))
             self.verify_report(rec, tip, [], {"status": "skipped", "reason": "no `verify` commands and no "
                                               f"`serve` in {CONFIG}"})
             say(f"Verify stage: nothing configured in {CONFIG}; skipping", DIM)
@@ -32,6 +35,10 @@ class Verification:
         if wt is None:
             return 1
         while True:
+            # A repaired commit cannot be accepted until its gate passed for this
+            # exact head and command, including after an interrupted/failed run.
+            if git(wt, "rev-parse", "HEAD") != tip and not self.verify_gate(rec, wt, vdir):
+                return 1
             if rec.get("phase") != "repair":
                 passed = self.verify_pass(rec, wt)
                 if passed is None:
@@ -46,12 +53,44 @@ class Verification:
             if not self.verify_repair(rec, wt, vdir):
                 return 1
             self.update(rec, phase="recheck")
-            log = self.log(vdir, "gate")
-            say(f"verify gate: {self.gate_cmd}", BOLD)
-            if self.shell(self.gate_cmd, wt, log):
-                return self.epic_fail(rec, "needs-human", f"the gate fails after the verify repair; see {log}. "
-                                      f"Fix it in {os.path.relpath(wt)}, then --final-only")
         return self.verify_merge(rec, wt, tip)
+
+    def verify_fingerprint(self, head):
+        files = {}
+        for name in dict.fromkeys([*self.cfg["linkFiles"], self.cfg["serveEnv"]]):
+            if name:
+                path = self.root / name
+                files[name] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+        inputs = {"head": head, "config": self.cfg, "gate": self.gate_cmd, "install": self.install_cmd,
+                  "files": files, "parent": self.parent_issue(),
+                  "tickets": [{"number": n, "title": self.tickets[n]["title"],
+                               "verification": list(nested_sections(self.tickets[n].get("body") or "", "Verification"))}
+                              for n in self.order]}
+        return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+    def verify_gate(self, rec, wt, vdir):
+        head = git(wt, "rev-parse", "HEAD")
+        evidence = {"head": head, "command": self.gate_cmd}
+        if rec.get("gatePassed") == evidence:
+            return True
+        log = self.log(vdir, "gate")
+        say(f"verify gate: {self.gate_cmd}", BOLD)
+        before_untracked = untracked(wt)
+        rc = self.shell(self.gate_cmd, wt, log)
+        if self.verify_tree_problem(wt, head) or untracked(wt) - before_untracked:
+            self.update(rec, unexpectedUntracked=sorted(untracked(wt) - before_untracked))
+            self.epic_fail(rec, "needs-human", "the verify gate changed the worktree; inspect it, then --final-only")
+            return False
+        if rc:
+            self.epic_fail(rec, "needs-human", f"the gate fails after the verify repair; see {log}. "
+                           f"Fix it in {os.path.relpath(wt)}, then --final-only")
+            return False
+        self.update(rec, gatePassed=evidence)
+        return True
+
+    def verify_tree_problem(self, wt, head):
+        return rebasing(wt) or edited(wt) or git(wt, "rev-parse", "HEAD") != head or \
+            self.check_worktree(wt, self.verify_branch())
 
     def verify_branch(self):
         return f"cc/{self.a.parent}/verify"
@@ -59,13 +98,22 @@ class Verification:
     def verify_worktree(self, rec, tip):
         """The verify worktree at the epic tip; a kept one (after needs-human) is reused with its fixes."""
         branch, wt = self.verify_branch(), self.worktrees / "verify"
-        if not wt.exists():
+        created = not wt.exists()
+        if created:
             self.worktrees.mkdir(parents=True, exist_ok=True)
             if attempt(self.root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").returncode:
                 git(self.root, "worktree", "add", "-q", "-b", branch, str(wt), tip)
-                self.update(rec, drop=("repaired", "phase", "check", "repair", "reason"))
+                self.update(rec, drop=("repaired", "phase", "check", "repair", "reason", "gatePassed"))
             else:
                 git(self.root, "worktree", "add", "-q", str(wt), branch)
+        if created:
+            self.provision(wt)
+        unexpected = set(rec.get("unexpectedUntracked", [])) & untracked(wt)
+        if unexpected:
+            self.epic_fail(rec, "needs-human", f"unexpected uncommitted files remain in {wt}: "
+                           f"{', '.join(sorted(unexpected))}; commit or remove them, then --final-only")
+            return None
+        self.update(rec, drop=("unexpectedUntracked",))
         resuming = self.a.resume and rec.get("phase") == "repair" and \
             rec.get("repair", {}).get("status") in RETRYABLE
         problem = (f"{os.path.relpath(wt)} is mid-rebase" if rebasing(wt) else
@@ -87,6 +135,8 @@ class Verification:
         """Every verify command, then the runtime checks; True, False, or None when a person must look."""
         vdir, cmds = self.folder / "verify", self.cfg["verify"]
         results = []
+        expected_head = git(wt, "rev-parse", "HEAD")
+        before_untracked = untracked(wt)
         for i, cmd in enumerate(cmds, 1):
             log = vdir / f"cmd-{i}.log"
             say(f"verify [{i}/{len(cmds)}]: {cmd}", BOLD)
@@ -94,6 +144,12 @@ class Verification:
             say(f"verify [{i}/{len(cmds)}] {'passed' if rc == 0 else f'failed (exit {rc})'} ({os.path.relpath(log)})",
                 BOLD, GREEN if rc == 0 else RED)
             results.append({"cmd": cmd, "rc": rc, "log": str(log)})
+            self.guard()
+            if self.verify_tree_problem(wt, expected_head) or untracked(wt) - before_untracked:
+                self.update(rec, unexpectedUntracked=sorted(untracked(wt) - before_untracked))
+                self.epic_fail(rec, "needs-human", f"verify command changed tracked code, HEAD, or worktree "
+                               f"configuration; inspect {wt}, then --final-only")
+                return None
         if any(r["rc"] for r in results):
             runtime = {"status": "not-run", "reason": "verify commands failed"} if self.cfg["serve"] else \
                 {"status": "skipped", "reason": f"no `serve` in {CONFIG}"}
@@ -107,6 +163,7 @@ class Verification:
         if runtime["status"] == "stuck":
             self.epic_fail(rec, runtime.get("agent", "needs-human"), runtime["reason"])
             return None
+        self.update(rec, checkedHead=head)
         passed = not any(r["rc"] for r in results) and runtime["status"] in ("pass", "skipped")
         say(f"Verify {'passed' if passed else 'failed'}. Report: {os.path.relpath(vdir / 'report.md')}",
             GREEN if passed else RED, BOLD)
@@ -121,14 +178,14 @@ class Verification:
             app = self.spawn_child(cfg["serve"], shell=True, cwd=wt, env=env, stdout=out, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + cfg["readyTimeout"]
-            while not probe(cfg["ready"], wt, env):
+            while not probe(cfg["ready"], wt, env, min(30, max(0.001, deadline - time.monotonic()))):
                 if app.poll() is not None:
                     return {"status": "fail", "reason": f"the app exited ({app.returncode}) before `ready` "
                             f"succeeded; see {log}"}
                 if time.monotonic() > deadline:
                     return {"status": "fail", "reason": f"`ready` did not succeed within {cfg['readyTimeout']}s; "
                             f"see {log}"}
-                time.sleep(1)
+                time.sleep(min(1, max(0, deadline - time.monotonic())))
             say("verify: the app is ready; running the verifier", BOLD)
             check, head = rec.setdefault("check", {}), git(wt, "rev-parse", "HEAD")
             session = check.get("sessionId") if self.a.resume and check.get("status") in RETRYABLE \
@@ -136,12 +193,14 @@ class Verification:
             self.update(rec, phase="check")
             self.update(check, drop=() if session else ("sessionId",))
             extra = ["--tools-enable", ",".join(BROWSER_TOOLS)] if cfg["browser"] else []
+            verifier_untracked = untracked(wt)
             text = self.run_agent(self.a.verify_model, self.a.verify_effort, self.a.verify_max_turns,
                                   self.verifier_prompt(wt), vdir / "check", check, session, cwd=wt,
                                   tag="verify", extra=extra)
             self.guard()
             self.update(rec, phase=None)
-            if edited(wt) or git(wt, "rev-parse", "HEAD") != head or self.check_worktree(wt, self.verify_branch()):
+            if self.verify_tree_problem(wt, head) or untracked(wt) - verifier_untracked:
+                self.update(rec, unexpectedUntracked=sorted(untracked(wt) - verifier_untracked))
                 return {"status": "stuck", "reason": f"the verifier changed {os.path.relpath(wt)}, but it must "
                         "be read-only; inspect the worktree, then --final-only"}
             if check["status"] != "reported":
@@ -150,22 +209,58 @@ class Verification:
             result = verdict(text, r"VERIFY=(PASS|FAIL)")
             if result == "MISSING":
                 return {"status": "stuck", "reason": f"the verifier gave no VERIFY= line; see {vdir / 'check'}"}
-            # One line per check, led by its result; prose that mentions a result word does not count.
-            counts = {k: len(re.findall(rf"^[\s>*_|-]*(?:\d+[.)]\s*)?\**{k}\b", text, re.M))
+            rows = re.findall(r"^[\s>*_|-]*(?:\d+[.)]\s*)?\**(VERIFIED|FAILED|UNVERIFIABLE)\s+(C\d+)\b[^\n]*", text, re.M)
+            expected = {check["id"] for check in self.check_manifest()}
+            reported = [check_id for _, check_id in rows]
+            if set(reported) != expected or len(reported) != len(set(reported)):
+                return {"status": "stuck", "reason": "verifier report must identify every check exactly once "
+                        f"using its check ID; see {vdir / 'check'}"}
+            counts = {k: sum(status == k for status, _ in rows)
                       for k in ("VERIFIED", "FAILED", "UNVERIFIABLE")}
+            if result == "PASS" and counts["FAILED"]:
+                return {"status": "stuck", "reason": f"contradictory verifier report: FAILED checks with "
+                        f"VERIFY=PASS; see {vdir / 'check'}"}
+            # Do not accept unstructured extra failures concealed by a final PASS.
+            all_failed = re.findall(r"^[\s>*_|-]*(?:\d+[.)]\s*)?\**FAILED\b", text, re.M)
+            if result == "PASS" and all_failed:
+                return {"status": "stuck", "reason": f"contradictory verifier report: FAILED checks with "
+                        f"VERIFY=PASS; see {vdir / 'check'}"}
             return {"status": result.lower(), "report": str(vdir / "check" / "final.txt"), "counts": counts,
                     "text": text}
         finally:
             kill(app)
             self.reap(app)
 
+    def check_manifest(self):
+        """Assign stable IDs to explicit check items; prose sections stay one check."""
+        checks = []
+        def add(source, body):
+            body = re.sub(r"^\s*(```|~~~)[^\n]*\n.*?^\s*\1[^\n]*$", "", body, flags=re.M | re.S)
+            items = re.findall(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)(?:\[[ xX]\]\s*)?(.+)$", body, re.M)
+            for item in items or ([body.strip()] if body.strip() else []):
+                checks.append({"id": f"C{len(checks) + 1:03d}", "source": source, "text": item})
+        for n in self.order:
+            for _, body in nested_sections(self.tickets[n].get("body") or "", "Verification"):
+                add(f"ticket #{n}", body)
+        parent = self.parent_issue().get("body") or ""
+        checkpoints = list(nested_sections(parent, "Checkpoint"))
+        for title, body in checkpoints:
+            add(f"parent #{self.a.parent}: {title}", body)
+        if not checkpoints:
+            add(f"parent #{self.a.parent}", parent)
+        if not checks:
+            checks.append({"id": "C001", "source": "runtime", "text": "Exercise the running app's primary behavior."})
+        return checks
+
     def checks_file(self):
         """Every ticket's `## Verification` items and the parent issue, for the verifier."""
         parts = [f"# Checks for epic #{self.a.parent}\n"]
         for n in self.order:
-            found = section(self.tickets[n].get("body") or "", "Verification")
+            found = "\n\n".join(body for _, body in nested_sections(self.tickets[n].get("body") or "", "Verification"))
             parts.append(f"## #{n} — {self.tickets[n]['title']}\n{found or '(no Verification section)'}\n")
         parts.append(f"## Parent issue #{self.a.parent} (use its checkpoints)\n{self.parent_issue().get('body') or ''}\n")
+        parts += ["## Check IDs (report every ID exactly once)",
+                  *[f"- {c['id']}: {c['source']} — {c['text']}" for c in self.check_manifest()]]
         path = self.folder / "verify" / "checks.md"
         path.write_text("\n".join(parts))
         return path
@@ -224,6 +319,10 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
     def verify_merge(self, rec, wt, tip):
         """Fast-forward the epic to the verified head (same guards as a ticket), then drop the worktree."""
         branch, head = self.verify_branch(), git(wt, "rev-parse", "HEAD")
+        if self.verify_tree_problem(wt, rec.get("checkedHead")):
+            return self.epic_fail(rec, "needs-human", f"verification worktree changed since checks; inspect {wt}")
+        if head != tip and rec.get("gatePassed") != {"head": head, "command": self.gate_cmd}:
+            return self.epic_fail(rec, "needs-human", "verification repair gate has not passed for this commit")
         if head != tip:
             touched = git(wt, "diff", "--name-only", tip, "HEAD", "--", *self.protected)
             if touched:
@@ -233,12 +332,13 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
             with self.integration:
                 self.check_main()
                 git(self.root, "merge", "-q", "--ff-only", branch)
+                self.guard()
             say(f"Verified fixes merged into {self.epic} (now {head[:8]})", GREEN, BOLD)
             if self.lock_changed(self.root, tip, head):
                 say(f"a lockfile changed; running {self.install_cmd} in the main worktree", BOLD)
                 if subprocess.run(self.install_cmd, shell=True, cwd=self.root).returncode:
                     raise Fatal(f"{self.install_cmd} failed in the main worktree after the verify repair")
-        self.update(rec, status="pass", head=head, ran=True, phase=None, drop=("reason",))
+        self.update(rec, status="pass", head=head, fingerprint=self.verify_fingerprint(head), ran=True, phase=None, drop=("reason",))
         try:
             git(self.root, "worktree", "remove", "--force", str(wt))
             git(self.root, "branch", "-q", "-d", branch)

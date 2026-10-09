@@ -51,8 +51,9 @@ class Runner(
                      *(root / f for f in project)]
         # A protected file that is missing now must stay missing: an agent creating one counts as changing it.
         self.snapshots = {p: p.read_bytes() if p.exists() else None for p in protected}
-        self.protected = project
-        self.hands_off = ", ".join(project)
+        self.protected = list(dict.fromkeys([*project, *(str(p.relative_to(root)) for p in protected
+                                                       if p.is_relative_to(root))]))
+        self.hands_off = ", ".join(self.protected)
         notes = (root / "AGENTS.md").read_text(errors="replace") if (root / "AGENTS.md").exists() else ""
         self.notes = section(notes, "Ticket Runner") is not None
 
@@ -100,16 +101,16 @@ class Runner(
                         "Commit or stash them, then --resume. No files discarded.")
 
     def execute(self):
-        self.persist()
-        attempt(self.root, "worktree", "prune")
-        self.selected = [] if self.a.final_only else ([self.a.only] if self.a.only else self.order)
-        pending = self.preflight(self.selected)
         try:
+            self.persist()
+            attempt(self.root, "worktree", "prune")
+            self.selected = [] if self.a.final_only else ([self.a.only] if self.a.only else self.order)
+            pending = self.preflight(self.selected)
             outcome = self.schedule(pending)
+            return self.stages() if outcome is None else outcome
         except BaseException:
             self.stop()
             raise
-        return self.stages() if outcome is None else outcome
 
     def stages(self):
         """Verify, then the epic review, each skipped while its result still holds for the epic head."""

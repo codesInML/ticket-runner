@@ -38,15 +38,26 @@ def rebasing(cwd):
 
 
 def kill(child):
+    # A shell may exit while background descendants keep its process group alive.
     try:
         os.killpg(child.pid, signal.SIGTERM)
     except ProcessLookupError:
+        child.wait()
         return
     try:
         child.wait(timeout=5)
     except subprocess.TimeoutExpired:
+        pass
+    try:
         os.killpg(child.pid, signal.SIGKILL)
-        child.wait()
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # macOS can return EPERM for an already terminated orphan group.
+        # A live leader must still surface a genuine cleanup failure.
+        if child.poll() is None:
+            raise
+    child.wait()
 
 
 def save(path, data):
@@ -55,13 +66,16 @@ def save(path, data):
     tmp.replace(path)
 
 
-def probe(cmd, cwd, env):
-    """One run of the `ready` command; a hung probe counts as not ready."""
+def probe(cmd, cwd, env, timeout=30):
+    """One bounded readiness attempt, including cleanup of shell descendants."""
+    child = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
     try:
-        return subprocess.run(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=30).returncode == 0
+        return child.wait(timeout=max(0.001, timeout)) == 0
     except subprocess.TimeoutExpired:
         return False
+    finally:
+        kill(child)
 
 
 def read_env(path):

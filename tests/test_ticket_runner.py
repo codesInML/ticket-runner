@@ -64,7 +64,11 @@ from pathlib import Path
 args=sys.argv[1:]
 with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(args)+'\\n')
 none={'totalCount':0, 'nodes':[]}
-if args[:2] == ['issue', 'list']: print(os.environ['ISSUES'])
+if args[:2] == ['issue', 'list']:
+    if os.environ.get('DISCOVERY_DELAY'):
+        Path(os.environ['ROOT'], 'discovery.log').write_text('started')
+        __import__('time').sleep(float(os.environ['DISCOVERY_DELAY']))
+    print(os.environ['ISSUES'])
 elif args[:2] == ['issue', 'view'] and any('body' in a for a in args):
     print(json.dumps({'title': 'Epic title', 'body': os.environ.get('PARENT_BODY', '')}))
 elif args[:2] == ['issue', 'view']: print('CLOSED')
@@ -76,14 +80,19 @@ elif args[0] == 'pr':
     if args[1] == 'list':
         print(json.dumps([{'number': p['number'], 'url': p['url']} for p in prs
                           if p['head'] == opt('--head') and p['state'] == 'OPEN']))
+    elif args[1] == 'view':
+        p = next(p for p in prs if p['number'] == int(args[2]))
+        print(json.dumps({'state': p['state'], 'headRefOid': p['oid'], 'headRefName': p['head']}))
     elif args[1] == 'create':
         n = 300 + len(prs)
         prs.append({'number': n, 'url': 'https://github.com/acme/engine/pull/%d' % n, 'head': opt('--head'),
                     'base': opt('--base'), 'title': opt('--title'), 'body': Path(opt('--body-file')).read_text(),
-                    'state': 'OPEN'})
+                    'state': 'OPEN', 'oid': __import__('subprocess').check_output(['git','rev-parse','HEAD'], text=True).strip()})
         print(prs[-1]['url'])
     elif args[1] == 'edit':
-        next(p for p in prs if p['number'] == int(args[2]))['body'] = Path(opt('--body-file')).read_text()
+        p = next(p for p in prs if p['number'] == int(args[2]))
+        p['body'] = Path(opt('--body-file')).read_text()
+        p['oid'] = __import__('subprocess').check_output(['git','rev-parse','HEAD'], text=True).strip()
     elif args[1] == 'checks':
         sys.exit(int(os.environ.get('CHECKS_RC', '0')))
     elif args[1] == 'merge':
@@ -119,10 +128,18 @@ if 'You are the verifier' in prompt:
     port = os.environ.get('TEST_PORT')
     seen = urllib.request.urlopen('http://127.0.0.1:' + port).read().decode().strip() if port else 'no app'
     if mode == 'verifier-edit': Path('work.txt').write_text('verifier edit')
+    if mode == 'verifier-new-file': Path('new-runtime-output.txt').write_text('created during checks')
+    if mode == 'verifier-ignored-file': Path('runtime-output.log').write_text('created during checks')
     if mode == 'verifier-cap' and '--resume' not in args: done('', 'verify-session', 'max_turns', 8)
     fail = mode in ('verify-fail', 'verify-fail-always') and (mode == 'verify-fail-always' or not Path('fixed.txt').exists())
-    done('## RESULTS\\n- ' + ('FAILED' if fail else 'VERIFIED') + ' GET / answered ' + seen +
-         '\\n- UNVERIFIABLE needs production data\\n' + ('VERIFY=FAIL' if fail else 'VERIFY=PASS'), 'verify-session')
+    import re
+    path = re.search(r'(\S+/checks.md)', prompt)[1]
+    ids = re.findall(r'^- (C\d+):', Path(path).read_text(), re.M)
+    rows = [('FAILED' if fail else 'VERIFIED') + ' ' + ids[0] + ' GET / answered ' + seen]
+    rows += ['UNVERIFIABLE ' + cid + ' needs production data' for cid in ids[1:]]
+    if mode == 'verifier-contradictory': rows[0] = rows[0].replace('VERIFIED', 'FAILED')
+    if mode == 'verifier-missing': rows = []
+    done('## RESULTS\\n' + '\\n'.join(rows) + '\\n' + ('VERIFY=FAIL' if fail else 'VERIFY=PASS'), 'verify-session')
 if 'You write the launch plan' in prompt:
     if mode == 'plan-cap' and '--resume' not in args: done('', 'plan-session', 'max_turns', 8)
     done('## Pre-launch checklist\\n- [x] Tests pass (verify report)\\n## Residual risk\\n- UNVERIFIABLE: needs '
@@ -142,6 +159,27 @@ if ticket_review:
                       'finalText':'## BLOCKING\\n' + ('- a.ts:1 wrong' if fail else 'None.') + '\\n## DEFERRED\\n'
                                    '- old bug in b.ts:2\\n' + ('VERDICT=FAIL' if fail else 'VERDICT=PASS')}))
     sys.exit(0)
+if not review and mode in ('parallel', 'parallel-conflict'):
+    if 'stopped with conflicts' in prompt:
+        Path('shared.txt').write_text('209 and 210\\n')
+        subprocess.run(['git', 'add', 'shared.txt'], check=True)
+        subprocess.run(['git', '-c', 'core.editor=true', 'rebase', '--continue'], check=True)
+        done('STATUS=COMPLETE', 'ticket-session')
+    number = Path.cwd().name
+    import time
+    root = Path(os.environ['ROOT'])
+    (root / 'fake-bin' / ('parallel-ready-' + number)).write_text('ready')
+    deadline = time.monotonic() + 10
+    while not all((root / 'fake-bin' / ('parallel-ready-' + n)).exists() for n in ('209', '210')):
+        if time.monotonic() >= deadline: raise RuntimeError('parallel start barrier timed out')
+        time.sleep(.02)
+    if number == '210':
+        state = root / '.scratch/run-tickets-commandcode/207/state.json'
+        while json.loads(state.read_text()).get('209', {}).get('status') != 'done':
+            if time.monotonic() >= deadline: raise RuntimeError('first integration timed out')
+            time.sleep(.02)
+    commit('shared.txt' if mode == 'parallel-conflict' else 'ticket-' + number + '.txt', number)
+    done('STATUS=COMPLETE', 'ticket-session')
 if not review:
     if os.environ.get('PROBE'):
         with open(os.environ['PROBE'], 'a') as f:
@@ -192,6 +230,7 @@ sys.exit(8 if cap else 0)
                      'WORKFLOW', 'TICKET_REVIEW_MODEL', 'TICKET_REVIEW_EFFORT', 'TICKET_REVIEW_MAX_TURNS',
                      'VERIFY_MODEL', 'VERIFY_EFFORT', 'VERIFY_MAX_TURNS', 'GATE_CMDS', 'INSTALL_CMD'):
             self.env.pop(name, None)
+        self.configure(gate=['true'])
 
     def fake(self, name, source):
         path = self.bin / name
@@ -215,10 +254,12 @@ sys.exit(8 if cap else 0)
 
     def configure(self, commit=True, **config):
         (self.root / ".agents").mkdir(exist_ok=True)
+        config.setdefault('gate', ['true'])
         (self.root / ".agents/ticket-runner.json").write_text(json.dumps(config))
         if commit:
             self.git("add", ".agents/ticket-runner.json")
-            self.git("commit", "-qm", "Configure the runner")
+            if self.git("diff", "--cached", "--name-only"):
+                self.git("commit", "-qm", "Configure the runner")
 
     def gh_calls(self):
         return [json.loads(line) for line in (self.root / "gh.log").read_text().splitlines()]
@@ -549,6 +590,206 @@ sys.exit(8 if cap else 0)
 
     # ── verify stage ─────────────────────────────────────────────────────
 
+    def test_successful_integration_gate_cannot_change_tested_commit(self):
+        self.configure(gate=['echo changed >> README.md; git add README.md; git commit -qm gate-change'])
+        result = self.run_script('--no-final-review')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Integration gate changed HEAD', result.stderr)
+        self.assertEqual((self.root / 'README.md').read_text(), 'Project\n')
+        self.assertNotEqual(self.state()['209']['status'], 'done')
+
+    def test_failed_verify_gate_preserves_new_files_and_refuses_resume(self):
+        self.configure(verify=['test -f fixed.txt'], gate=['echo unintended > stray-source.py; false'])
+        self.env['GATE_CMDS'] = 'true'
+        self.assertEqual(self.run_script('--no-verify', '--no-final-review').returncode, 0)
+        self.env.pop('GATE_CMDS')
+        self.assertNotEqual(self.run_script('--final-only', '--no-ship').returncode, 0)
+        self.assertEqual(self.state()['_verify']['unexpectedUntracked'], ['stray-source.py'])
+        self.assertNotEqual(self.run_script('--final-only', '--no-ship').returncode, 0)
+        self.assertTrue((self.root / '.scratch/worktrees/verify/stray-source.py').exists())
+        self.assertIn('unexpected uncommitted files remain', self.state()['_verify']['reason'])
+
+    def test_human_commits_in_kept_verify_worktree_require_gate(self):
+        self.serve()
+        config = json.loads((self.root / '.agents/ticket-runner.json').read_text())
+        config['gate'] = ['false']
+        self.configure(**config)
+        self.env['GATE_CMDS'] = 'true'
+        self.assertEqual(self.run_script('--no-verify', '--no-final-review').returncode, 0)
+        self.env.pop('GATE_CMDS')
+        self.assertNotEqual(self.run_script('--final-only', '--no-ship', mode='verifier-missing').returncode, 0)
+        wt = self.root / '.scratch/worktrees/verify'
+        with (wt / 'README.md').open('a') as out: out.write('human fix\n')
+        subprocess.run(['git', 'add', 'README.md'], cwd=wt, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'Human fix'], cwd=wt, check=True)
+        result = self.run_script('--final-only', '--no-ship')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('gate fails', self.state()['_verify']['reason'])
+        self.assertEqual((self.root / 'README.md').read_text(), 'Project\n')
+
+    def test_existing_verify_worktree_link_tampering_is_not_repaired_silently(self):
+        with (self.root / '.gitignore').open('a') as out: out.write('.env\n')
+        (self.root / '.env').write_text('PRIVATE=value')
+        self.git('add', '.gitignore'); self.git('commit', '-qm', 'Ignore local env')
+        self.configure(verify=['false'])
+        self.assertNotEqual(self.run_script('--no-ship').returncode, 0)
+        link = self.root / '.scratch/worktrees/verify/.env'
+        link.unlink(); link.write_text('tampered')
+        self.assertNotEqual(self.run_script('--final-only', '--no-ship').returncode, 0)
+        self.assertEqual(link.read_text(), 'tampered')
+        self.assertIn('no longer links', self.state()['_verify']['reason'])
+
+    def test_cached_pull_request_on_different_commit_is_rejected(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        prs = self.prs(); prs[0]['oid'] = '0' * 40
+        (self.root / 'prs.json').write_text(json.dumps(prs))
+        self.assertNotEqual(self.run_script('--final-only').returncode, 0)
+        self.assertIn('no longer matches', self.state()['_ship']['reason'])
+
+    def test_parallel_independent_tickets_rebase_and_gate_before_integrating(self):
+        self.issues[1]['body'] = 'Parent #207'
+        result = self.run_script('--jobs', '2', '--no-final-review', mode='parallel')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('rebasing onto', result.stdout)
+        self.assertEqual((self.root / 'ticket-209.txt').read_text(), '209')
+        self.assertEqual((self.root / 'ticket-210.txt').read_text(), '210')
+        self.assertEqual([self.state()[str(n)]['status'] for n in (209, 210)], ['done', 'done'])
+        logs = list((self.root / '.scratch/run-tickets-commandcode/207').glob('*/gate-*.log'))
+        self.assertEqual(len(logs), 2)
+
+    def test_parallel_conflict_repair_preserves_both_slices_and_runs_gate(self):
+        self.issues[1]['body'] = 'Parent #207'
+        result = self.run_script('--jobs', '2', '--no-final-review', mode='parallel-conflict')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('rebase conflicted', result.stdout)
+        self.assertEqual((self.root / 'shared.txt').read_text(), '209 and 210\n')
+        self.assertEqual(len(self.calls()), 3)
+        self.assertEqual([self.state()[str(n)]['status'] for n in (209, 210)], ['done', 'done'])
+
+    def test_checkout_lock_precedes_discovery_and_state_snapshot(self):
+        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success', DISCOVERY_DELAY='1')
+        slow = subprocess.Popen([str(RUNNER / 'bin/ticket-runner'), '207', '--no-final-review'],
+                                cwd=self.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: slow.kill() if slow.poll() is None else None)
+        import time
+        deadline = time.monotonic() + 5
+        while not (self.root / 'discovery.log').exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        fast = self.run_script('--no-final-review')
+        self.assertNotEqual(fast.returncode, 0)
+        self.assertIn('Another ticket runner is active', fast.stderr)
+        _, errors = slow.communicate(timeout=20)
+        self.assertEqual(slow.returncode, 0, errors)
+        self.assertEqual(self.kinds(), ['implement', 'implement'])
+
+    def test_interrupt_during_verification_stops_shell_and_descendants(self):
+        self.configure(verify=['echo $$ > command.pid; sleep 60'])
+        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success')
+        runner = subprocess.Popen([str(RUNNER / 'bin/ticket-runner'), '207', '--no-ship'],
+                                  cwd=self.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: runner.kill() if runner.poll() is None else None)
+        import signal, time
+        marker = self.root / '.scratch/worktrees/verify/command.pid'
+        deadline = time.monotonic() + 15
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertTrue(marker.exists())
+        child = int(marker.read_text())
+        runner.send_signal(signal.SIGINT)
+        runner.communicate(timeout=10)
+        self.assertEqual(runner.returncode, 130)
+        with self.assertRaises(ProcessLookupError): os.kill(child, 0)
+
+    def test_verify_commands_cannot_discard_new_unignored_files(self):
+        self.configure(verify=['echo new > new-uncommitted.txt'])
+        result = self.run_script('--no-ship')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.root / '.scratch/worktrees/verify/new-uncommitted.txt').exists())
+        self.assertEqual(self.state()['_verify']['status'], 'needs-human')
+        self.assertNotEqual(self.run_script('--final-only', '--no-ship').returncode, 0)
+        self.assertTrue((self.root / '.scratch/worktrees/verify/new-uncommitted.txt').exists())
+
+    def test_verify_commands_cannot_mutate_tracked_code(self):
+        self.configure(verify=["echo changed >> README.md"])
+        result = self.run_script('--no-ship')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.state()['_verify']['status'], 'needs-human')
+        self.assertTrue((self.root / '.scratch/worktrees/verify/README.md').read_text().endswith('changed\n'))
+        self.assertEqual((self.root / 'README.md').read_text(), 'Project\n')
+
+    def test_failed_verify_repair_gate_is_retried_on_resume(self):
+        self.configure(verify=["test -f fixed.txt"], gate=["false"])
+        # Finish tickets with a working gate before testing the verify repair gate.
+        self.env['GATE_CMDS'] = 'true'
+        self.assertEqual(self.run_script('--no-verify', '--no-final-review').returncode, 0)
+        self.env.pop('GATE_CMDS')
+        self.assertNotEqual(self.run_script('--final-only', '--no-ship').returncode, 0)
+        self.assertNotEqual(self.run_script('--final-only', '--no-ship').returncode, 0)
+        self.assertEqual(self.state()['_verify']['status'], 'needs-human')
+        self.assertGreaterEqual(len(list(self.verify_dir().glob('gate-*.log'))), 2)
+        self.assertFalse((self.root / 'fixed.txt').exists())
+
+    def test_new_ignored_runtime_artifacts_are_tolerated(self):
+        self.serve()
+        result = self.run_script('--no-ship', mode='verifier-ignored-file')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()['_verify']['status'], 'pass')
+
+    def test_new_unignored_runtime_files_are_preserved_and_refused(self):
+        self.serve()
+        result = self.run_script('--no-ship', mode='verifier-new-file')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.state()['_verify']['status'], 'needs-human')
+        self.assertEqual(self.state()['_verify']['unexpectedUntracked'], ['new-runtime-output.txt'])
+        artifact = self.root / '.scratch/worktrees/verify/new-runtime-output.txt'
+        self.assertEqual(artifact.read_text(), 'created during checks')
+        self.assertNotEqual(self.run_script('--final-only', '--no-ship').returncode, 0)
+        self.assertTrue(artifact.exists())
+        self.assertNotIn('_review', self.state())
+
+    def test_verifier_contradictory_and_missing_results_are_rejected(self):
+        self.serve()
+        for mode in ('verifier-contradictory', 'verifier-missing'):
+            with self.subTest(mode=mode):
+                result = self.run_script('--no-ship', mode=mode)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.state()['_verify']['status'], 'needs-human')
+                self.assertNotIn('_review', self.state())
+
+    def test_new_verify_worktree_provisions_links(self):
+        with (self.root / '.gitignore').open('a') as out: out.write('.env\n')
+        (self.root / '.env').write_text('PRIVATE=value')
+        self.git('add', '.gitignore'); self.git('commit', '-qm', 'Ignore local env')
+        self.configure(verify=["test -L .env"])
+        result = self.run_script('--no-ship')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_changed_runtime_inputs_invalidate_all_stages(self):
+        self.serve()
+        self.assertEqual(self.run_script().returncode, 0)
+        before = len(self.calls())
+        with (self.root / '.env.verify').open('a') as out: out.write('NEW_SECRET=secret-regression-value\n')
+        self.assertEqual(self.run_script('--final-only').returncode, 0)
+        self.assertEqual(self.kinds()[before:], ['verifier', 'epic review', 'launch plan'])
+        self.assertNotIn('secret-regression-value', json.dumps(self.state()))
+
+    def test_closed_cached_pull_request_requires_attention(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        prs = self.prs(); prs[0]['state'] = 'CLOSED'
+        (self.root / 'prs.json').write_text(json.dumps(prs))
+        result = self.run_script('--final-only')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('closed', self.state()['_ship']['reason'].lower())
+        self.assertNotEqual(self.run_script('--final-only').returncode, 0)
+        self.assertEqual(len(self.prs()), 1)
+
+    def test_gate_runs_for_every_ticket_without_a_rebase(self):
+        self.configure(gate=["echo checked >> gate.log"])
+        result = self.run_script('--no-final-review')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        logs = list((self.root / '.scratch/run-tickets-commandcode/207').glob('*/gate-*.log'))
+        self.assertEqual(len(logs), 2)
+
     def verify_dir(self):
         return self.root / ".scratch/run-tickets-commandcode/207/verify"
 
@@ -643,7 +884,7 @@ sys.exit(8 if cap else 0)
         self.assertIn('Checkpoint: after #210', checks)
         self.assertIn('answered hello from the app', (self.verify_dir() / 'check/final.txt').read_text())
         report = (self.verify_dir() / 'report.md').read_text()
-        self.assertIn('VERIFY=PASS (1 VERIFIED, 0 FAILED, 1 UNVERIFIABLE)', report)
+        self.assertIn('VERIFY=PASS (1 VERIFIED, 0 FAILED, 0 UNVERIFIABLE)', report)
         self.assertNotIn('s3cret-token', result.stdout + result.stderr)
         with socket.socket() as sock:  # The app was stopped.
             self.assertNotEqual(sock.connect_ex(('127.0.0.1', port)), 0)
@@ -875,7 +1116,7 @@ sys.exit(8 if cap else 0)
         self.assertIsNone(self.state()['_review']['verified'])
         self.assertEqual(self.run_script('--final-only', '--no-ship').returncode, 0)
         self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review'])
-        self.assertEqual(self.state()['_review']['verified'], self.git('rev-parse', 'HEAD'))
+        self.assertEqual(self.state()['_review']['verified'], self.state()['_verify']['fingerprint'])
 
     def test_skip_flag_combinations(self):
         result = self.run_script('--final-only', '--no-verify', '--no-final-review')

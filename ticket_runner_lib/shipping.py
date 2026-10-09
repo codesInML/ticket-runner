@@ -18,11 +18,22 @@ class Shipping:
         head = git(self.root, "rev-parse", "HEAD")
         verify = self.data.get("_verify", {})
         verified = not a.no_verify and verify.get("status") == "pass" and verify.get("head") == head
-        if rec.get("head") != head or rec.get("verified") != verified:
-            self.update(rec, head=head, verified=verified, status="in-progress",
+        evidence = self.evidence(head)
+        if rec.get("head") != head or rec.get("verified") != verified or rec.get("evidence") != evidence:
+            self.update(rec, head=head, verified=verified, evidence=evidence, status="in-progress",
                         drop=("plan", "pr", "url", "reason"))
         say(f"\n━━ Ship stage for #{a.parent} at {head[:8]} ━━", BOLD, BLUE)
-        if rec.get("status") in ("pr-open", "merged"):
+        if rec.get("pr"):
+            remote = gh_json("pr", "view", str(rec["pr"]), "--json", "state,headRefOid,headRefName")
+            if remote.get("headRefOid") != head or remote.get("headRefName") != self.epic:
+                return self.epic_fail(rec, "needs-human", f"pull request #{rec['pr']} no longer matches "
+                                      "the reviewed branch and commit; inspect it before shipping")
+            if remote.get("state") == "CLOSED":
+                return self.epic_fail(rec, "needs-human", f"pull request #{rec['pr']} was closed without merging; "
+                                      "reopen it before shipping")
+            if remote.get("state") not in ("OPEN", "MERGED"):
+                return self.epic_fail(rec, "needs-human", "could not confirm the pull request state")
+            self.update(rec, status="merged" if remote["state"] == "MERGED" else "pr-open")
             say(f"Pull request #{rec['pr']} is already up to date for {head[:8]} ({rec.get('url')})", DIM)
         else:
             if not self.launch_plan(rec, head, verified):

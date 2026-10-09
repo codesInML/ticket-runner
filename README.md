@@ -32,3 +32,36 @@ modules do not import the workflow classes.
 Run `python3 -m unittest discover -s tests -q`. The integration suite uses
 temporary git repositories and fake GitHub and CommandCode executables. Runtime
 verification tests also start a temporary server on localhost.
+
+## Integration and recovery guarantees
+
+The runner holds one checkout lock before reading saved state or discovering issues.
+Every ticket runs the configured gate before integration, including tickets whose
+base has not moved. Gates and verification commands must leave tracked code and
+HEAD unchanged; new unignored files created by verification commands are kept for
+inspection and require a human. Ignore intentional build artifacts in the project.
+Runtime artifacts already present when the verifier starts may remain untracked in
+the disposable verification worktree. Ignore uploads, logs, and other app artifacts
+that checks can create later: newly appearing unignored files cannot be distinguished
+from verifier edits, so the runner preserves them and requires inspection.
+
+Verification repairs and human commits in a kept verification worktree require a
+passing gate for the exact commit and effective command before merging. A failed
+gate is retried on resume. Unexpected edits are preserved rather than discarded.
+The runner itself is protected when it lives inside the target repository.
+
+Cached verification fingerprints the epic commit, effective configuration and gate,
+ticket Verification sections, parent checkpoints, and hashes of local linked/env
+files. Changed inputs invalidate verification and its downstream review and launch
+plan, even at unchanged HEAD. Env values are never stored in fingerprints or logs.
+The verifier reports every stable check ID from `checks.md` exactly once, with a
+result and evidence; missing, duplicate, or contradictory results require inspection.
+
+Shipping refreshes a saved pull request's state and commit from GitHub. Closed
+unmerged requests require reopening; requests on a different commit require
+inspection. Readiness probes obey the remaining timeout, and process groups are
+terminated on completion, timeout, or interruption, including background descendants.
+
+State writes remain immediate and atomic for recovery. A local benchmark of 200
+writes measured about 1.0 ms/write for 10 records and 1.4 ms/write for 100 records;
+there was no evidence that sacrificing immediate checkpoints would help.
