@@ -72,7 +72,7 @@ def positive(value):
 def parse_args():
     p = argparse.ArgumentParser(prog="ticket-runner", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Model aliases: flash or deepseek (default), flash-fast, muse, luna, glm, claude.
-Full CommandCode model IDs also work. Sonnet 5.5 runs the epic review by default; the
+Full CommandCode model IDs also work. DeepSeek and GLM run the epic review by default; the
 launch plan runs on deepseek (or glm, never Claude); luna runs the verifier; verify
 repairs use the implementation model.
 Effort defaults: max for implementation (xhigh for Muse contributor), high for reviews.

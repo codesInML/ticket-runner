@@ -44,3 +44,23 @@ def rows(body, verbs):
 def empty(body):
     """A section that says there is nothing: blank, or just "None."."""
     return not body or bool(re.fullmatch(r"[\s*_-]*none\.?[\s*_]*", body, re.I))
+
+
+def review_rows(body, verbs):
+    """Parse every report entry, retaining indented evidence; reject partial reports."""
+    if empty(body):
+        return [], None
+    parsed = []
+    for line in body.splitlines():
+        if not line.strip():
+            continue
+        matches = rows(line, verbs)
+        if matches:
+            parsed.append(list(matches[0]))
+        elif parsed and re.match(r"^ {2,}\S", line) and not re.match(r"^\s*[-*+]\s", line):
+            parsed[-1][2] += "\n" + line.strip()
+        else:
+            return [], "unparsed report entry: " + line.strip()
+    if any(empty(evidence) or not evidence.strip(" \t—–-:*_`") for _, _, evidence in parsed):
+        return [], "every entry must include evidence"
+    return parsed, None

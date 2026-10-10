@@ -1,5 +1,7 @@
 """The epic review: independent reviewers, cross-examination, fix tickets, a follow-up, and closing tickets."""
 
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -10,7 +12,7 @@ from .github import discover, gh_json
 from .graph import waves
 from .processes import attempt, dirty, git
 from .settings import BLUE, BOLD, DIM, FIX_LABEL, GREEN, MODELS, RETRYABLE, REVIEW_PROTOCOL, YELLOW
-from .text import empty, rows, section, verdict
+from .text import empty, review_rows, section, verdict
 
 
 FINDING = ("BLOCKING", "DEFERRED")
@@ -36,20 +38,38 @@ class EpicReview:
     def review_dir(self):
         return self.folder / "review"
 
+    def review_fix_tickets(self, rv):
+        """Own filed tickets, including a create interrupted before its number was saved."""
+        marker = f"<!-- ticket-runner: epic #{self.a.parent} review {rv['start'][:12]} draft " if rv.get("start") else None
+        created = {n for n in self.order if marker and marker in (self.tickets[n].get("body") or "")}
+        return set(rv.get("fixTickets", [])) | set(rv.get("filed", {}).values()) | created
+
+    def review_fingerprint(self, rv=None):
+        """Requirements and diff base, independent of verification's runtime configuration."""
+        rv = rv or {}
+        pending_fixes = self.review_fix_tickets(rv) - set(rv.get("inputTickets", []))
+        inputs = {"parent": self.parent_issue(), "base": self.data["_meta"]["epicBase"],
+                  "tickets": [{"number": n, "title": self.tickets[n]["title"],
+                               "body": self.tickets[n].get("body") or "",
+                               "blockers": self.tickets[n]["blockers"]}
+                              for n in self.order if n not in pending_fixes]}
+        return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
     def review_covers(self, head):
         """A SHIP verdict holds for its own head, and for the head a passing repair review extended it to."""
         rv = self.data.get("_review", {})
-        if rv.get("protocol") != REVIEW_PROTOCOL or rv.get("workflow") != self.a.workflow or rv.get("status") != "ship":
+        if rv.get("protocol") != REVIEW_PROTOCOL or rv.get("workflow") != self.a.workflow or \
+                rv.get("fingerprint") != self.review_fingerprint(rv) or rv.get("status") != "ship":
             return False
         if rv.get("head") == head:
             return True
-        repair = self.data.get("_verify", {}).get("repairReview", {})
-        return repair.get("status") == "pass" and repair.get("base") == rv.get("head") and repair.get("head") == head
+        return head in rv.get("acceptedRepairs", [])
 
     def review_resumable(self, rv, head):
         """An unfinished review of the same epic by the same reviewers, at the head its phase expects."""
         if rv.get("protocol") != REVIEW_PROTOCOL or rv.get("workflow") != self.a.workflow or \
-                rv.get("models") != self.a.epic_review_models:
+                rv.get("models") != self.a.epic_review_models or \
+                rv.get("fingerprint") != self.review_fingerprint(rv):
             return False
         phase = rv.get("phase")
         if phase in ("review", "check", "tickets", "file"):
@@ -94,17 +114,19 @@ class EpicReview:
         letters = [n[0].upper() for n in names]
         if len(set(letters)) < len(letters) or not all("A" <= x <= "Z" for x in letters):
             letters = list("AB")[:len(models)]
+        labels = [m if names.count(n) > 1 else n for n, m in zip(names, models)]
         rv = {"protocol": REVIEW_PROTOCOL, "workflow": self.a.workflow, "models": models, "start": head,
-              "head": head, "phase": "review", "status": "in-progress", "findings": {},
-              "reviewers": [{"name": n, "letter": x, "model": m, "dir": f"{x.lower()}-{n}"}
-                            for n, x, m in zip(names, letters, models)]}
+              "head": head, "fingerprint": self.review_fingerprint(), "inputTickets": list(self.order),
+              "phase": "review", "status": "in-progress", "findings": {},
+              "reviewers": [{"name": label, "letter": x, "model": m, "dir": f"{x.lower()}-{n}"}
+                            for n, label, x, m in zip(names, labels, letters, models)]}
         with self.state:
             self.data["_review"] = rv
             self.persist()
         return rv
 
     def run_reviewers(self, rv, todo, step, prompt):
-        """One session turn for each reviewer in `todo`, all at once: the finished ones' texts by name.
+        """One session turn for each reviewer in `todo`, all at once: the finished ones' texts by full model ID.
 
         None when the main worktree changed; an unfinished session is left in rv["stopped"] for stopped().
         """
@@ -135,7 +157,7 @@ class EpicReview:
             self.update(rv, stopped=[r["status"], f"the {r['name']} reviewer ended {r['status']} during the "
                                      f"{STEPS[step]}; --resume --epic-only continues it (logs in "
                                      f"{self.review_dir() / r['dir'] / step})"])
-        return {r["name"]: text for r, text in zip(todo, texts) if r["status"] == "reported"}
+        return {r["model"]: text for r, text in zip(todo, texts) if r["status"] == "reported"}
 
     def stopped(self, rv):
         """The failure a reviewer's unfinished session left for this step, once the others' reports are kept."""
@@ -150,7 +172,9 @@ class EpicReview:
         body = section(text, "FINDINGS")
         if body is None:
             return None, "no `## FINDINGS` section"
-        found = rows(body, FINDING)
+        found, problem = review_rows(body, FINDING)
+        if problem:
+            return None, problem
         ids = [i for i, _, _ in found]
         if not found and not empty(body):
             return None, f"FINDINGS lines are not in the `- {r['letter']}1 BLOCKING file:line — …` shape"
@@ -162,7 +186,7 @@ class EpicReview:
         if result == "MISSING":
             return None, f"its report does not end with {end.split('=')[0]}="
         blocking = any(c == "BLOCKING" for _, c, _ in found)
-        if result in ("SHIP", "FIX-FIRST") and (result == "SHIP") == blocking:
+        if result in ("SHIP", "FIX-FIRST", "PASS", "FAIL") and (result in ("SHIP", "PASS")) == blocking:
             return None, f"contradictory report: VERDICT={result} with{'' if blocking else ' no'} BLOCKING findings"
         return {i: (c, t) for i, c, t in found}, None
 
@@ -173,14 +197,14 @@ class EpicReview:
             if texts is None:
                 return 1
             problems = []
-            for r in (r for r in todo if r["name"] in texts):
-                found, problem = self.parse_findings(texts[r["name"]], r, r"VERDICT=(SHIP|FIX-FIRST)")
+            for r in (r for r in todo if r["model"] in texts):
+                found, problem = self.parse_findings(texts[r["model"]], r, r"VERDICT=(SHIP|FIX-FIRST)")
                 if problem:
                     problems.append(f"{r['name']}: {problem}")
                     continue
                 with self.state:
                     for i, (cls, text) in found.items():
-                        rv["findings"][i] = {"by": r["name"], "class": cls, "text": text, "round": "review"}
+                        rv["findings"][i] = {"by": r["model"], "class": cls, "text": text, "round": "review"}
                 self.update(r, reviewed=True)
             if self.stopped(rv):
                 return 1
@@ -196,7 +220,7 @@ class EpicReview:
         pair = len(reviewers) > 1
 
         def targets(r):
-            return [i for i, f in rv["findings"].items() if f["round"] == round_ and (f["by"] != r["name"]) == pair]
+            return [i for i, f in rv["findings"].items() if f["round"] == round_ and (f["by"] != r["model"]) == pair]
 
         todo = [r for r in reviewers if targets(r) and step not in r.get("checked", [])]
         if todo:
@@ -209,22 +233,28 @@ class EpicReview:
                 return 1
             verbs = ("CONFIRMED", "DISPUTED") if pair else ("CONFIRMED", "WITHDRAWN")
             problems = []
-            for r in (r for r in todo if r["name"] in texts):
-                text, want = texts[r["name"]], targets(r)
-                answers = rows(section(text, "ANSWERS"), verbs)
+            for r in (r for r in todo if r["model"] in texts):
+                text, want = texts[r["model"]], targets(r)
+                answers, problem = review_rows(section(text, "ANSWERS"), verbs)
+                if problem:
+                    problems.append(f"{r['name']}: {problem}")
+                    continue
                 if verdict(text, r"CHECK=(DONE)") == "MISSING":
                     problems.append(f"{r['name']}: its report does not end with CHECK=DONE")
                     continue
                 if sorted(i for i, _, _ in answers) != sorted(want):
                     problems.append(f"{r['name']} must answer each of {', '.join(want)} exactly once")
                     continue
-                own = {i for i, f in rv["findings"].items() if f["by"] == r["name"] and f["round"] == round_}
-                withdrawn = rows(section(text, "WITHDRAWN"), ("WITHDRAWN",)) if pair else []
+                own = {i for i, f in rv["findings"].items() if f["by"] == r["model"] and f["round"] == round_}
+                withdrawn, problem = review_rows(section(text, "WITHDRAWN"), ("WITHDRAWN",)) if pair else ([], None)
+                if problem or any(i not in own for i, _, _ in withdrawn):
+                    problems.append(f"{r['name']}: {problem or 'withdrawal must identify its own finding'}")
+                    continue
                 with self.state:
                     for i, verb, evidence in answers:
                         rv["findings"][i].update(outcome={"CONFIRMED": "confirmed", "DISPUTED": "disputed",
                                                           "WITHDRAWN": "withdrawn"}[verb],
-                                                 answer=evidence, checkedBy=r["name"])
+                                                 answer=evidence, checkedBy=r["model"])
                     for i, _, why in withdrawn:
                         if i in own:
                             rv["findings"][i]["withdrawn"] = why or "withdrawn by its reviewer"
@@ -254,7 +284,7 @@ class EpicReview:
                                    lambda r: self.ticket_writer_prompt(rv, drafts, rv.get("asked")))
         if texts is None or self.stopped(rv):
             return 1
-        status, report = verdict(texts[writer["name"]]), self.review_dir() / writer["dir"] / "tickets" / "final.txt"
+        status, report = verdict(texts[writer["model"]]), self.review_dir() / writer["dir"] / "tickets" / "final.txt"
         if status == "NEEDS_HUMAN":
             self.update(rv, asked=True)
             return self.epic_fail(rv, "needs-human", f"the ticket writer needs a decision; see {report}. Answer on "
@@ -375,6 +405,9 @@ class EpicReview:
         if missing:
             return self.epic_fail(rv, "needs-human", f"fix ticket(s) {' '.join(f'#{n}' for n in missing)} are not "
                                   f"sub-tickets of #{self.a.parent}; --epic-only looks again")
+        if set(rv["fixTickets"]) - set(rv["inputTickets"]):
+            inputs = {**rv, "inputTickets": list(self.order)}
+            self.update(rv, inputTickets=inputs["inputTickets"], fingerprint=self.review_fingerprint(inputs))
         todo = [n for n in rv["fixTickets"] if not self.complete(n)]
         if todo:
             say(f"\n━━ Fix tickets from the epic review: {' '.join(f'#{n}' for n in todo)} ━━", BOLD, BLUE)
@@ -393,10 +426,11 @@ class EpicReview:
                 return 1
             wanted = sorted(i for i, f in rv["findings"].items() if self.blocking(f))
             problems = []
-            for r in (r for r in todo if r["name"] in texts):
-                text = texts[r["name"]]
-                fixes = rows(section(text, "FIXES"), ("NOT FIXED", "FIXED"))
+            for r in (r for r in todo if r["model"] in texts):
+                text = texts[r["model"]]
+                fixes, fix_problem = review_rows(section(text, "FIXES"), ("NOT FIXED", "FIXED"))
                 found, problem = self.parse_findings(text, r, r"FOLLOW-UP=(DONE)")
+                problem = problem or fix_problem
                 if not problem and sorted(i for i, _, _ in fixes) != wanted:
                     problem = f"it must mark each of {', '.join(wanted)} FIXED or NOT FIXED exactly once"
                 if not problem and set(found) & set(rv["findings"]):
@@ -406,9 +440,9 @@ class EpicReview:
                     continue
                 with self.state:
                     for i, verb, evidence in fixes:
-                        rv["findings"][i].setdefault("fixes", {})[r["name"]] = [verb, evidence]
+                        rv["findings"][i].setdefault("fixes", {})[r["model"]] = [verb, evidence]
                     for i, (cls, text_) in found.items():
-                        rv["findings"][i] = {"by": r["name"], "class": cls, "text": text_, "round": "follow"}
+                        rv["findings"][i] = {"by": r["model"], "class": cls, "text": text_, "round": "follow"}
                     r["followed"] = True
                     self.persist()
             if self.stopped(rv):
@@ -466,16 +500,19 @@ class EpicReview:
             say(f"Closed #{n}", DIM)
 
     def report_sections(self, rv):
+        names = {r["model"]: r["name"] for r in rv["reviewers"]}
+        def name(model):
+            return names.get(model, model)
         def line(i, f):
-            text = f"- {i} ({f['by']}) {f['text']}"
+            text = f"- {i} ({name(f['by'])}) {f['text']}"
             if outcome(f) == "confirmed" and f.get("checkedBy"):
-                text += f" — confirmed by {f['checkedBy']}: {f.get('answer') or 'no detail'}"
+                text += f" — confirmed by {name(f['checkedBy'])}: {f.get('answer') or 'no detail'}"
             if outcome(f) == "disputed":
-                text += f" — disputed by {f['checkedBy']}: {f.get('answer') or 'no detail'}"
+                text += f" — disputed by {name(f['checkedBy'])}: {f.get('answer') or 'no detail'}"
             if outcome(f) == "withdrawn":
                 text += f" — withdrawn: {f.get('withdrawn') or f.get('answer') or 'no detail'}"
-            for name, (verb, evidence) in f.get("fixes", {}).items():
-                text += f"\n  - {name}: {verb} {evidence}".rstrip()
+            for model, (verb, evidence) in f.get("fixes", {}).items():
+                text += f"\n  - {name(model)}: {verb} {evidence}".rstrip()
             return text
         groups = {"Confirmed blocking findings": lambda f: self.blocking(f),
                   "Deferred findings": lambda f: f["class"] == "DEFERRED" and outcome(f) == "confirmed",

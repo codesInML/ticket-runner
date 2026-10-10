@@ -43,7 +43,7 @@ TICKET_WRITING_SKILLS = {"osmani": "planning-and-task-breakdown", "pocock": "to-
 # Epic review defaults: two different model families that cross-examine each other's findings.
 EPIC_REVIEWERS = "deepseek,glm"
 # Bumped whenever the shape of a saved epic review changes; an older record is reviewed again.
-REVIEW_PROTOCOL = 2
+REVIEW_PROTOCOL = 3
 FIX_LABEL = "epic-review-fix"
 VERIFY_SKILLS = ("debugging-and-error-recovery",)
 SHIP_SKILLS = ("shipping-and-launch",)

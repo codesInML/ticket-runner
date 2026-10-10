@@ -143,7 +143,7 @@ out of the epic's scope. Style and taste are not findings. Write "None." when th
 evidence does not count.
 """
         if other:
-            own = ", ".join(i for i, f in rv["findings"].items() if f["by"] == r["name"]) or "none"
+            own = ", ".join(i for i, f in rv["findings"].items() if f["by"] == r["model"]) or "none"
             return f"""Cross-examination{' of the follow-up review' if follow else ''} for epic #{self.a.parent}. The other reviewer ({other['name']})
 reviewed the same code on its own; its report is at {report}.
 Check each of its findings against the code yourself: CONFIRMED when the code shows the problem is real

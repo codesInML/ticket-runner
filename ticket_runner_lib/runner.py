@@ -110,6 +110,12 @@ class Runner(
             self.persist()
             attempt(self.root, "worktree", "prune")
             self.selected = [] if self.a.epic_only else ([self.a.only] if self.a.only else self.order)
+            rv = self.data.get("_review", {})
+            remaining = [n for n in self.order if not self.complete(n)]
+            if self.a.epic_only and not self.a.no_epic_review and rv.get("phase") in ("file", "fix") and \
+                    set(remaining) <= self.review_fix_tickets(rv) and \
+                    self.review_resumable(rv, git(self.root, "rev-parse", "HEAD")):
+                return self.stages()
             pending = self.preflight(self.selected)
             outcome = self.schedule(pending)
             return self.stages() if outcome is None else outcome

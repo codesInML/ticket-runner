@@ -83,6 +83,7 @@ elif args[:2] == ['issue', 'create']:
     issues['created'].append({'number': n, 'title': opt('--title'), 'body': Path(opt('--body-file')).read_text(),
                               'state': 'OPEN'})
     issues_file.write_text(json.dumps(issues))
+    if os.environ.get('CREATE_RESULT_LOST'): sys.exit(1)
     print('https://github.com/acme/engine/issues/%d' % n)
 elif args[:2] == ['issue', 'close']:
     issues['closed'].append(int(args[2]))
@@ -169,7 +170,7 @@ if 'You write the launch plan' in prompt:
 if 'verify stage failed' in prompt:
     if mode == 'repair-cap' and not resumed: done('', 'repair-session', 'max_turns', 8)
     if mode == 'repair-protected': commit('AGENTS.md', 'changed by the repair')
-    commit('other.txt' if mode == 'repair-noop' else 'fixed.txt', 'fixed')
+    commit('other.txt' if mode == 'repair-noop' else os.environ.get('REQUIRED_FIX', 'fixed.txt'), 'fixed')
     done('STATUS=NEEDS_HUMAN' if mode == 'repair-human' else 'STATUS=COMPLETE', 'repair-session')
 if 'You are the repair reviewer' in prompt:
     fail = mode == 'repair-review-fail'
@@ -185,11 +186,13 @@ if 'You are an epic reviewer' in prompt:
     letter = re.search(r'numbered ([A-Z])1', prompt)[1]
     if mode == 'epic-cap' and letter == 'D' and not resumed: done('', 'epic-D', 'max_turns', 8)
     found = {'D': ['- D1 DEFERRED b.ts:2 — old bug in b.ts:2 — seen in b.ts']}.get(letter, [])
-    if mode in ('fix', 'fix-not-fixed', 'fix-regression', 'dispute', 'writer-bad') and letter == 'D':
+    if mode in ('fix', 'fix-not-fixed', 'fix-regression', 'fix-empty', 'dispute', 'writer-bad') and letter == 'D':
         found.append('- D2 BLOCKING a.ts:1 — the total counts twice — a.ts:1 adds it again')
-    if mode in ('fix', 'fix-not-fixed', 'fix-regression', 'writer-bad') and letter == 'G':
+    if mode in ('fix', 'fix-not-fixed', 'fix-regression', 'fix-empty', 'writer-bad') and letter == 'G':
         found.append('- G1 BLOCKING a.ts:1 — the total is wrong — a.ts:1')
     if mode == 'self-withdraw': found = ['- %s1 BLOCKING a.ts:1 — maybe wrong — guessed' % letter]
+    if mode == 'mixed-findings': found += ['- %s2 DEFERRED a.ts:1 — valid' % letter, '- `%s3` BLOCKING a.ts:1 — malformed' % letter]
+    if mode == 'collision' and letter == 'A': found = ['- A1 BLOCKING a.ts:1 — broken — evidence']
     blocking = any('BLOCKING' in f for f in found) and mode != 'review-contradict'
     if mode == 'review-contradict': found.append('- %s9 BLOCKING z.ts:1 — broken — z.ts:1' % letter)
     done('## INTEGRATION\\nThe tickets fit.\\n## FINDINGS\\n' + ('\\n'.join(found) or 'None.') + '\\n'
@@ -197,6 +200,7 @@ if 'You are an epic reviewer' in prompt:
 if 'Cross-examination' in prompt or 'Self-check for epic' in prompt:
     verb = 'DISPUTED' if mode == 'dispute' else 'WITHDRAWN' if mode == 'self-withdraw' else 'CONFIRMED'
     answers = [] if mode == 'cross-missing' else ['- %s %s a.ts:1 shows it' % (i, verb) for i in ids('exactly once:')]
+    if mode == 'cross-empty': answers = ['- %s %s' % (i, verb) for i in ids('exactly once:')]
     done('## ANSWERS\\n' + '\\n'.join(answers) + '\\n## WITHDRAWN\\nNone.\\nCHECK=DONE', resumed or 'check-session')
 if 'You are the ticket writer' in prompt:
     drafts = Path(re.search(r'its own file (\\S+)/NN-short-slug.md', prompt)[1])
@@ -211,6 +215,7 @@ if 'Follow-up review for epic' in prompt:
     letter = re.search(r'numbered on from ([A-Z])', prompt)[1]
     verb = 'NOT FIXED' if mode == 'fix-not-fixed' else 'FIXED'
     fixes = ['- %s %s a.ts:1 counts once' % (i, verb) for i in ids('IDs:')]
+    if mode == 'fix-empty': fixes = ['- %s FIXED' % i for i in ids('IDs:')]
     new = ['- D3 BLOCKING c.ts:1 — the fix crashes — c.ts:1'] if mode == 'fix-regression' and letter == 'D' else []
     done('## FIXES\\n' + '\\n'.join(fixes) + '\\n## FINDINGS\\n' + ('\\n'.join(new) or 'None.') + '\\nFOLLOW-UP=DONE',
          resumed or 'follow-session')
@@ -1187,6 +1192,99 @@ sys.exit(8 if cap else 0)
         path = self.root / "issues.json"
         return json.loads(path.read_text())['created'] if path.exists() else []
 
+    def test_colliding_reviewer_names_keep_both_reports(self):
+        result = self.run_script('--epic-review-model', 'vendor-a/model,vendor-b/model', mode='collision')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.created_issues()), 1)
+        self.assertEqual(self.state()['_review']['findings']['A1']['outcome'], 'confirmed')
+        self.assertEqual(len(self.state()['_review']['findings']['A1']['fixes']), 2)
+
+    def test_requirements_invalidate_completed_and_interrupted_reviews(self):
+        self.assertEqual(self.run_script('--no-ship').returncode, 0)
+        self.env['PARENT_BODY'] += '\n- [ ] New parent requirement'
+        self.assertEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
+        self.assertEqual(self.kinds().count('epic review'), 4)
+        self.issues[0]['body'] += '\nNew ticket requirement'
+        self.assertEqual(self.run_script('--epic-only', '--no-ship', mode='epic-cap').returncode, 1)
+        self.env['PARENT_BODY'] += '\nChanged again'
+        self.assertEqual(self.run_script('--resume', '--epic-only', '--no-ship').returncode, 0)
+        self.assertEqual(self.kinds().count('epic review'), 8)
+        self.assertNotIn('--resume', self.call('epic review'))
+
+    def test_epic_only_resumes_failed_review_fix_ticket(self):
+        self.env['GATE_CMDS'] = 'test "$(basename "$PWD")" != 400'
+        self.assertEqual(self.run_script(mode='fix').returncode, 1)
+        self.assertEqual(self.state()['_review']['phase'], 'fix')
+        self.env['GATE_CMDS'] = 'true'
+        result = self.run_script('--resume', '--epic-only', mode='fix')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.state()['400']['status'], 'done')
+        self.assertEqual(len(self.created_issues()), 1)
+
+    def test_epic_only_recovers_issue_created_before_filing_result_was_saved(self):
+        self.env['CREATE_RESULT_LOST'] = '1'
+        self.assertEqual(self.run_script(mode='fix').returncode, 1)
+        self.assertEqual(self.state()['_review']['phase'], 'file')
+        self.assertEqual(self.state()['_review']['filed'], {})
+        self.assertEqual(len(self.created_issues()), 1)
+        self.env.pop('CREATE_RESULT_LOST')
+        self.issues.append({'number': 211, 'title': 'Unfinished ordinary ticket',
+                            'body': 'Parent #207', 'state': 'OPEN'})
+        before = len(self.calls())
+        refused = self.run_script('--resume', '--epic-only', mode='fix')
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('Epic incomplete', refused.stdout)
+        self.assertEqual(len(self.calls()), before)
+        self.issues.pop()
+        result = self.run_script('--resume', '--epic-only', mode='fix')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.created_issues()), 1)
+        self.assertEqual(self.kinds().count('epic review'), 2)
+
+    def test_runtime_input_change_preserves_accepted_repair_coverage(self):
+        self.configure(verify=['test -f fixed.txt'])
+        self.assertEqual(self.run_script('--no-ship').returncode, 0)
+        self.env['GATE_CMDS'] = 'echo changed gate'
+        result = self.run_script('--epic-only', '--merge')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.state()['_ship']['status'], 'merged')
+        self.assertEqual(self.kinds().count('epic review'), 2)
+        self.assertEqual(self.kinds().count('repair review'), 1)
+
+    def test_consecutive_repairs_extend_coverage_without_repeating_epic_review(self):
+        self.configure(verify=['test -f "$REQUIRED_FIX"'])
+        self.env['REQUIRED_FIX'] = 'fixed.txt'
+        self.assertEqual(self.run_script('--no-ship').returncode, 0)
+        first = self.git('rev-parse', 'HEAD')
+        self.env['REQUIRED_FIX'] = 'fixed-again.txt'
+        self.env['GATE_CMDS'] = 'echo second verification'
+        result = self.run_script('--epic-only', '--no-ship')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        second = self.git('rev-parse', 'HEAD')
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.state()['_review']['acceptedRepairs'], [first, second])
+        self.env['GATE_CMDS'] = 'echo third verification'
+        result = self.run_script('--epic-only', '--merge')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.kinds().count('epic review'), 2)
+        self.assertEqual(self.kinds().count('repair review'), 2)
+
+    def test_partial_malformed_findings_are_rejected(self):
+        result = self.run_script(mode='mixed-findings')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.state()['_review']['status'], 'needs-human')
+        self.assertNotIn('launch plan', self.kinds())
+
+    def test_cross_examination_requires_evidence(self):
+        result = self.run_script(mode='cross-empty')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('evidence', self.state()['_review']['reason'])
+
+    def test_follow_up_requires_evidence(self):
+        result = self.run_script(mode='fix-empty')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('evidence', self.state()['_review']['reason'])
+
     def test_confirmed_blocking_findings_become_fix_tickets_then_one_follow_up_ships(self):
         result = self.run_script(mode='fix')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1299,6 +1397,34 @@ sys.exit(8 if cap else 0)
         self.assertIn('repair review found blocking problems', self.state()['_verify']['reason'])
         self.assertFalse((self.root / 'fixed.txt').exists())
         self.assertNotIn('_ship', self.state())
+
+    def test_legacy_cached_repair_pass_requires_a_new_validated_report(self):
+        self.configure(verify=['test -f fixed.txt'])
+        self.assertEqual(self.run_script(mode='repair-review-fail').returncode, 1)
+        state = self.state()
+        state['_verify']['repairReview'].update(status='pass', protocol=2)
+        path = self.root / '.scratch/run-tickets-commandcode/207/state.json'
+        path.write_text(json.dumps(state))
+        result = self.run_script('--epic-only', mode='repair-review-fail')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.kinds().count('repair review'), 2)
+        self.assertFalse((self.root / 'fixed.txt').exists())
+        self.assertNotIn('acceptedRepairs', self.state()['_review'])
+
+    def test_changed_requirements_invalidate_cached_repair_pass_at_same_heads(self):
+        self.configure(verify=['test -f fixed.txt'])
+        self.assertEqual(self.run_script(mode='repair-review-fail').returncode, 1)
+        state = self.state()
+        state['_verify']['repairReview'].update(status='pass', protocol=state['_review']['protocol'],
+                                                fingerprint=state['_review']['fingerprint'])
+        path = self.root / '.scratch/run-tickets-commandcode/207/state.json'
+        path.write_text(json.dumps(state))
+        self.env['PARENT_BODY'] += '\n- [ ] New requirement for the repair'
+        result = self.run_script('--epic-only', mode='repair-review-fail')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.kinds().count('epic review'), 4)
+        self.assertEqual(self.kinds().count('repair review'), 2)
+        self.assertFalse((self.root / 'fixed.txt').exists())
 
     def test_merge_needs_the_repair_review_to_carry_the_ship_verdict(self):
         self.configure(verify=["test -f fixed.txt"], gate=["true"])

@@ -10,7 +10,7 @@ import time
 
 from .display import say
 from .processes import attempt, edited, git, kill, probe, read_env, rebasing, untracked
-from .settings import BLUE, BOLD, BROWSER_TOOLS, CONFIG, DIM, Fatal, GREEN, RED, RETRYABLE, YELLOW
+from .settings import BLUE, BOLD, BROWSER_TOOLS, CONFIG, DIM, Fatal, GREEN, RED, RETRYABLE, REVIEW_PROTOCOL, YELLOW
 from .text import nested_sections, section, verdict
 
 
@@ -105,8 +105,7 @@ class Verification:
             self.worktrees.mkdir(parents=True, exist_ok=True)
             if attempt(self.root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").returncode:
                 git(self.root, "worktree", "add", "-q", "-b", branch, str(wt), tip)
-                self.update(rec, drop=("repaired", "phase", "check", "repair", "reason", "gatePassed",
-                                       "repairReview"))
+                self.update(rec, drop=("repaired", "phase", "check", "repair", "reason", "gatePassed"))
             else:
                 git(self.root, "worktree", "add", "-q", str(wt), branch)
         if created:
@@ -323,7 +322,10 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
         """One epic reviewer reads only the repair, so the epic review's SHIP extends to the repaired head."""
         a, vdir, head = self.a, self.folder / "verify", git(wt, "rev-parse", "HEAD")
         rr = rec.setdefault("repairReview", {})
-        if rr.get("status") == "pass" and rr.get("base") == tip and rr.get("head") == head:
+        if rr.get("status") == "pass" and rr.get("protocol") == REVIEW_PROTOCOL and \
+                rr.get("base") == tip and rr.get("head") == head and \
+                rr.get("fingerprint") == self.data.get("_review", {}).get("fingerprint"):
+            self.accept_repair(head, tip)
             return True
         model = a.epic_review_models[-1]
         session = rr.get("sessionId") if a.resume and rr.get("status") in RETRYABLE and rr.get("head") == head \
@@ -345,16 +347,25 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
                            f"continues it (logs in {vdir / 'repair-review'})")
             return False
         result = verdict(text, r"VERDICT=(PASS|FAIL)")
-        if result != "PASS":
+        _, problem = self.parse_findings(text, {"letter": "R"}, r"VERDICT=(PASS|FAIL)")
+        if result != "PASS" or problem:
             self.update(rr, status="fail")
             self.epic_fail(rec, "needs-human", ("the repair review found blocking problems in the verify repair"
-                                                if result == "FAIL" else "the repair review gave no verdict") +
+                                                if result == "FAIL" else f"the repair review is unusable: {problem}") +
                            f"; see {vdir / 'repair-review' / 'final.txt'}. Fix it in {os.path.relpath(wt)} "
                            "(commit there), then --epic-only")
             return False
-        self.update(rr, status="pass")
+        self.update(rr, status="pass", protocol=REVIEW_PROTOCOL,
+                    fingerprint=self.data["_review"]["fingerprint"])
+        self.accept_repair(head, tip)
         say(f"Repair review passed for {head[:8]}", GREEN, BOLD)
         return True
+
+    def accept_repair(self, head, tip):
+        """Keep accepted coverage with the epic review, through future verify runs and repairs."""
+        rv = self.data.get("_review", {})
+        if self.review_covers(tip):
+            self.update(rv, acceptedRepairs=list(dict.fromkeys([*rv.get("acceptedRepairs", []), head])))
 
     def verify_merge(self, rec, wt, tip):
         """Fast-forward the epic to the verified head (same guards as a ticket), then drop the worktree."""

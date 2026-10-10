@@ -54,8 +54,10 @@ The runner itself is protected when it lives inside the target repository.
 
 Cached verification fingerprints the epic commit, effective configuration and gate,
 ticket Verification sections, parent checkpoints, and hashes of local linked/env
-files. Changed inputs invalidate verification and its downstream review and launch
-plan, even at unchanged HEAD. Env values are never stored in fingerprints or logs.
+files. Changed runtime inputs invalidate verification and the launch plan, even at
+unchanged HEAD. The epic review separately fingerprints the parent and ticket requirements
+and the epic base; changing these invalidates completed and unfinished reviews. Accepted
+repair reviews extend SHIP coverage independently of temporary verification state. Env values are never stored in fingerprints or logs.
 The verifier reports every stable check ID from `checks.md` exactly once, with a
 result and evidence; missing, duplicate, or contradictory results require inspection.
 
