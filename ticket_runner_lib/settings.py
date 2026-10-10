@@ -72,7 +72,23 @@ CLONES = (["cp", "-cR"], ["cp", "-R"]) if sys.platform == "darwin" else (["cp", 
 COLOR = bool(os.getenv("FORCE_COLOR")) or (
     not os.getenv("NO_COLOR") and os.getenv("TERM") != "dumb" and sys.stdout.isatty())
 BOLD, DIM, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = "1", "2", "31", "32", "33", "34", "35", "36"
-TICKET_COLORS = ("36", "35", "33", "32", "34", "96", "95", "93", "92", "94")
+# 256 colours where the terminal says it has them; the 16 basic ones otherwise.
+COLOR256 = "256color" in os.getenv("TERM", "") or os.getenv("COLORTERM", "") in ("truecolor", "24bit")
+
+
+def shade(n, basic):
+    return f"38;5;{n}" if COLOR256 else basic
+
+
+# Tool lines keep one colour per kind of tool in every session, and no ticket or stage uses any of them:
+# reads steel blue, writes orange, shell lime, MCP (browser) tools teal. Errors stay red, retries yellow.
+TOOL_COLORS = {"read": shade(68, CYAN), "write": shade(208, MAGENTA), "shell": shade(112, GREEN),
+               "mcp": shade(37, "96")}
+# What the agent says is soft grey: the tag before it carries the ticket's colour.
+AGENT_TEXT = shade(250, "37")
+# Tickets count up this palette and the epic stages count down it, clear of the tool colours above.
+TICKET_COLORS = tuple(f"38;5;{n}" for n in (213, 121, 141, 180, 159, 168, 147, 177, 219, 135, 174, 183)) \
+    if COLOR256 else ("34", "94", "93", "92", "95", "91", "97")
 FILE_TOOLS = {"read_file", "edit_file", "write_file"}
 WRITE_TOOLS = {"edit_file", "write_file"}
 PRINT = threading.Lock()

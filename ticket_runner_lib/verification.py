@@ -198,7 +198,7 @@ class Verification:
             verifier_untracked = untracked(wt)
             text = self.run_agent(self.a.verify_model, self.a.verify_effort, self.a.verify_max_turns,
                                   self.verifier_prompt(wt), vdir / "check", check, session, cwd=wt,
-                                  tag="verify", extra=extra)
+                                  tag="verify", color=self.stage_color(2), extra=extra)
             self.guard()
             self.update(rec, phase=None)
             if self.verify_tree_problem(wt, head) or untracked(wt) - verifier_untracked:
@@ -298,7 +298,7 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
         self.update(rep, drop=() if session else ("sessionId",))
         before = untracked(wt)  # The app's leftovers; a file the repair adds but never commits is not.
         text = self.run_agent(self.a.model, self.a.effort, self.a.max_turns, prompt, vdir / "repair", rep,
-                              session, cwd=wt, tag="verify repair", color=YELLOW)
+                              session, cwd=wt, tag="verify repair", color=self.stage_color(3))
         self.guard()
         left = edited(wt) or bool(untracked(wt) - before)
         if rep["status"] != "reported":

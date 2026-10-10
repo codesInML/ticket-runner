@@ -88,7 +88,8 @@ class Runner(
         return TICKET_COLORS[self.order.index(n) % len(TICKET_COLORS)]
 
     def stage_color(self, i):
-        """Epic stage agents (each reviewer, then the verifier, repair and launch plan) count down the palette."""
+        """Epic stage agents count down the palette: reviewers 0-1, verifier 2, repair 3, repair review 4,
+        launch plan 5."""
         return TICKET_COLORS[-1 - i % len(TICKET_COLORS)]
 
     def guard(self):

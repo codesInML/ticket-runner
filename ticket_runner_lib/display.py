@@ -6,7 +6,7 @@ import shutil
 import sys
 import time
 
-from .settings import BOLD, COLOR, CYAN, DIM, FILE_TOOLS, MAGENTA, PRINT, RED, WRITE_TOOLS, YELLOW
+from .settings import AGENT_TEXT, BOLD, COLOR, DIM, FILE_TOOLS, PRINT, RED, TOOL_COLORS, WRITE_TOOLS, YELLOW
 
 
 def paint(text, *codes):
@@ -36,6 +36,13 @@ def describe(tool, args):
     return os.path.relpath(args["path"]) if args.get("path") else json.dumps(args)[:200]
 
 
+def tool_color(tool):
+    """One colour per kind of tool, the same in every session."""
+    kind = "mcp" if tool.startswith("mcp__") else "write" if tool in WRITE_TOOLS else \
+        "shell" if tool == "shell_command" else "read"
+    return TOOL_COLORS[kind]
+
+
 def message(value):
     if isinstance(value, dict):
         return str(value.get("message") or json.dumps(value))
@@ -55,11 +62,12 @@ def narrate(event, started, tag, color):
         blocks = content if isinstance(content, list) else [{"type": "text", "text": message(content)}]
         text = " ".join(str(b.get("text", "")) for b in blocks if isinstance(b, dict) and b.get("type") == "text")
         if text.strip():
-            say(f"{head} {paint('AGENT', BOLD, color)} {fit(text, used + 6)}")
+            say(f"{head} {paint('AGENT', BOLD, color)} {paint(fit(text, used + 6), AGENT_TEXT)}")
     elif kind == "tool_queued":
         tool = str(event.get("toolName", "?"))
-        tint = MAGENTA if tool in WRITE_TOOLS else CYAN
-        say(f"{head}   {paint('▸ ' + tool, tint)} {fit(describe(tool, event.get('input') or {}), used + 6 + len(tool))}")
+        tint = tool_color(tool)
+        detail = fit(describe(tool, event.get('input') or {}), used + 6 + len(tool))
+        say(f"{head}   {paint('▸ ' + tool, tint)} {paint(detail, tint)}")
     elif kind == "tool_errored":
         say(f"{head}   {paint('✗ ' + str(event.get('toolName', '?')), RED, BOLD)} {fit(message(event.get('error')), used + 24)}")
     elif kind in {"api_retry", "stream_restart"}:

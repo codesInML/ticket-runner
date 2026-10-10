@@ -85,7 +85,7 @@ removal ticket"). "None." when there are none.
 Deployment is out of scope: no deploy steps and no deploy section.
 Read-only: do not edit files, commit, change branches, push, open pull requests, or post comments.
 Use only CommandCode for agent work; do not invoke codex or claude CLIs.
-""", sdir / "plan", plan, session, tag="launch plan")
+""", sdir / "plan", plan, session, tag="launch plan", color=self.stage_color(5))
         self.guard()
         if dirty(self.root) or git(self.root, "rev-parse", "HEAD") != head:
             self.epic_fail(rec, "needs-human", "the launch plan agent changed the main worktree, but it must be "
