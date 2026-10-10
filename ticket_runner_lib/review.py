@@ -1,14 +1,12 @@
-"""Ticket and epic review sessions and deferred findings."""
+"""Ticket review sessions and their one fix round."""
 
 from pathlib import Path
 import os
-import re
-import subprocess
 
 from .display import say
 from .processes import dirty, git
-from .settings import BLUE, BOLD, DIM, GREEN, RED, RETRYABLE, YELLOW
-from .text import section, verdict
+from .settings import BOLD, GREEN, RETRYABLE, YELLOW
+from .text import verdict
 
 
 class Reviews:
@@ -94,71 +92,3 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
             return False
         self.update(record, status="ready-to-review", phase="review")
         return True
-
-    def evidence(self, head):
-        """The input fingerprint of passing verification at this head, otherwise None."""
-        verify = self.data.get("_verify", {})
-        return verify.get("fingerprint") if not self.a.no_verify and verify.get("status") == "pass" and verify.get("head") == head \
-            else None
-
-    def review_valid(self, review, head):
-        # A verdict holds for its head, workflow and evidence; with verify skipped now, any evidence will do.
-        return review.get("status") in ("ship", "fix-first") and review.get("head") == head and \
-            review.get("workflow") == self.a.workflow and \
-            (self.a.no_verify or review.get("verified") == self.evidence(head))
-
-    def review(self):
-        a = self.a
-        if dirty(self.root):
-            raise RuntimeError("Epic review requires a clean tree")
-        base = self.data["_meta"]["epicBase"]
-        head = git(self.root, "rev-parse", "HEAD")
-        review = self.data.setdefault("_review", {})
-        if self.review_valid(review, head):
-            say(f"Epic review already said {review['status'].upper()} at {head[:8]}; skipping. "
-                f"Report: {self.folder / 'review/final.txt'}", GREEN if review["status"] == "ship" else RED, BOLD)
-            return 0 if review["status"] == "ship" else 1
-        session = review.get("sessionId") if a.resume and review.get("status") in RETRYABLE and review.get("head") == head else None
-        self.update(review, status="in-progress", head=head, workflow=a.workflow, verified=self.evidence(head),
-                    drop=() if session else ("sessionId",))
-        say(f"\n━━ Epic review of #{a.parent} with {a.epic_review_model} ━━", BOLD, BLUE)
-        checks = self.epic_brief() if self.osmani else """Check integration between slices, every parent requirement (MET/UNMET with evidence),
-and real correctness/security defects. Cite file and line for each actionable finding.
-Read-only review: do not edit files, commit, change branches, push, or post comments.
-Use only CommandCode for agent work. Report INTEGRATION, EPIC SPEC, DEFECTS, and VERDICT.
-"""
-        report = self.folder / "verify" / "report.md"
-        evidence = (f"The verify stage's report is evidence for your review: {report}\n" if not a.no_verify
-                    and report.exists() else "The verify stage was skipped for this run (--no-verify).\n")
-        text = self.run_agent(a.epic_review_model, a.epic_review_effort, a.epic_review_max_turns, f"""You are the epic reviewer for epic #{a.parent}.
-Read AGENTS.md, the parent spec with gh issue view {a.parent}, and each ticket in {self.order}.
-Review git diff {base}..{head} and git log {base}..{head} as a whole.
-{evidence}{checks}End with exactly one line: VERDICT=SHIP or VERDICT=FIX-FIRST.
-""", self.folder / "review", review, session)
-        self.guard()
-        if dirty(self.root) or git(self.root, "rev-parse", "HEAD") != head:
-            self.update(review, status="modified-tree")
-        elif review["status"] == "reported":
-            self.update(review, status="ship" if text.strip().splitlines()[-1] == "VERDICT=SHIP" else "fix-first")
-            if self.osmani:
-                self.post_deferred(text, review)
-        print(text)
-        say(f"Epic review: {review['status']}. Report: {self.folder / 'review/final.txt'}",
-            GREEN if review["status"] == "ship" else RED, BOLD)
-        return 0 if review["status"] == "ship" else 1
-
-    def post_deferred(self, text, review):
-        """The runner, not the reviewer, posts the epic's consolidated DEFERRED findings: once per reviewed head."""
-        found = section(text, "DEFERRED")
-        if not found or re.fullmatch(r"none\.?", found, re.I) or review.get("deferredPosted") == review["head"]:
-            return
-        body = self.folder / "review" / "deferred.md"
-        body.write_text(f"Deferred findings from the epic review of #{self.a.parent} at `{review['head'][:8]}`: "
-                        f"real defects that no ticket in this epic owned.\n\n{found}\n")
-        result = subprocess.run(["gh", "issue", "comment", str(self.a.parent), "--body-file", str(body)],
-                                capture_output=True, text=True)
-        if result.returncode:
-            return say(f"Warning: could not post deferred findings on #{self.a.parent} ({result.stderr.strip()}); "
-                       f"they are in {body}", YELLOW, err=True)
-        self.update(review, deferredPosted=review["head"])
-        say(f"Posted the epic's deferred findings on #{self.a.parent}", DIM)

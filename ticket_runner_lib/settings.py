@@ -38,6 +38,13 @@ TICKET_REVIEW_SKILLS = ("code-review-and-quality", "security-and-hardening", "pe
                         "api-and-interface-design")
 INTEGRATION_SKILLS = ("git-workflow-and-versioning", "debugging-and-error-recovery")
 EPIC_REVIEW_SKILLS = ("code-review-and-quality", "security-and-hardening", "performance-optimization")
+# The epic review's ticket writer follows the workflow's own ticket-writing skill.
+TICKET_WRITING_SKILLS = {"osmani": "planning-and-task-breakdown", "pocock": "to-tickets"}
+# Epic review defaults: two different model families that cross-examine each other's findings.
+EPIC_REVIEWERS = "deepseek,glm"
+# Bumped whenever the shape of a saved epic review changes; an older record is reviewed again.
+REVIEW_PROTOCOL = 2
+FIX_LABEL = "epic-review-fix"
 VERIFY_SKILLS = ("debugging-and-error-recovery",)
 SHIP_SKILLS = ("shipping-and-launch",)
 BROWSER_SKILL = "browser-testing-with-devtools"

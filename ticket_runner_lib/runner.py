@@ -9,6 +9,7 @@ import threading
 
 from .agents import AgentProcesses
 from .display import say
+from .epic_review import EpicReview
 from .github import gh_json
 from .processes import attempt, dirty, git, save
 from .prompts import Prompts
@@ -24,7 +25,7 @@ from .worktrees import WorktreeIntegration
 
 class Runner(
     AgentProcesses, Scheduling, TicketImplementation, WorktreeIntegration,
-    Prompts, Reviews, Verification, Shipping,
+    Prompts, Reviews, EpicReview, Verification, Shipping,
 ):
     def __init__(self, a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg):
         self.a, self.root, self.folder, self.path, self.data, self.cfg = a, root, folder, path, data, cfg
@@ -86,6 +87,10 @@ class Runner(
     def color(self, n):
         return TICKET_COLORS[self.order.index(n) % len(TICKET_COLORS)]
 
+    def stage_color(self, i):
+        """Epic stage agents (each reviewer, then the verifier, repair and launch plan) count down the palette."""
+        return TICKET_COLORS[-1 - i % len(TICKET_COLORS)]
+
     def guard(self):
         changed = [p for p, contents in self.snapshots.items() if (p.read_bytes() if p.exists() else None) != contents]
         if changed:
@@ -113,9 +118,13 @@ class Runner(
             raise
 
     def stages(self):
-        """Verify, then the epic review, each skipped while its result still holds for the epic head."""
+        """Epic review, verify, then ship, each skipped while its result still holds for the epic head."""
         if dirty(self.root):
             raise RuntimeError("The epic stages require a clean main worktree")
+        if not self.a.no_epic_review:
+            outcome = self.epic_review()
+            if outcome:
+                return outcome
         if not self.a.no_verify:
             outcome = self.verify()
             if outcome:
@@ -123,11 +132,9 @@ class Runner(
         if self.a.no_epic_review:
             say("Epic review skipped (--no-epic-review), and with it the ship stage.", GREEN)
             return 0
-        outcome = self.review()
-        if outcome or self.a.no_ship:
-            if not outcome:
-                say("Ship stage skipped (--no-ship).", GREEN)
-            return outcome
+        if self.a.no_ship:
+            say("Ship stage skipped (--no-ship).", GREEN)
+            return 0
         return self.ship()
 
     def parent_issue(self):

@@ -15,7 +15,8 @@ OSMANI_SKILLS = ("incremental-implementation", "test-driven-development", "code-
                  "performance-optimization", "doubt-driven-development", "code-review-and-quality",
                  "git-workflow-and-versioning", "frontend-ui-engineering", "observability-and-instrumentation",
                  "documentation-and-adrs", "deprecation-and-migration", "ci-cd-and-automation",
-                 "browser-testing-with-devtools", "shipping-and-launch")
+                 "browser-testing-with-devtools", "shipping-and-launch", "planning-and-task-breakdown",
+                 "to-tickets")
 # A tiny app for the runtime checks: it refuses to start without the serveEnv token.
 SERVE = """import http.server, os
 assert os.environ.get('VERIFY_TOKEN') == 's3cret-token', 'serveEnv not loaded'
@@ -64,11 +65,28 @@ from pathlib import Path
 args=sys.argv[1:]
 with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(args)+'\\n')
 none={'totalCount':0, 'nodes':[]}
+issues_file = Path(os.environ['ISSUE_STATE'])
+issues = json.loads(issues_file.read_text()) if issues_file.exists() else {'created': [], 'closed': []}
+def everything():
+    found = json.loads(os.environ['ISSUES']) + issues['created']
+    for issue in found:
+        if issue['number'] in issues['closed']: issue['state'] = 'CLOSED'
+    return found
 if args[:2] == ['issue', 'list']:
     if os.environ.get('DISCOVERY_DELAY'):
         Path(os.environ['ROOT'], 'discovery.log').write_text('started')
         __import__('time').sleep(float(os.environ['DISCOVERY_DELAY']))
-    print(os.environ['ISSUES'])
+    print(json.dumps(everything()))
+elif args[:2] == ['issue', 'create']:
+    n = 400 + len(issues['created'])
+    opt = lambda name: args[args.index(name)+1]
+    issues['created'].append({'number': n, 'title': opt('--title'), 'body': Path(opt('--body-file')).read_text(),
+                              'state': 'OPEN'})
+    issues_file.write_text(json.dumps(issues))
+    print('https://github.com/acme/engine/issues/%d' % n)
+elif args[:2] == ['issue', 'close']:
+    issues['closed'].append(int(args[2]))
+    issues_file.write_text(json.dumps(issues))
 elif args[:2] == ['issue', 'view'] and any('body' in a for a in args):
     print(json.dumps({'title': 'Epic title', 'body': os.environ.get('PARENT_BODY', '')}))
 elif args[:2] == ['issue', 'view']: print('CLOSED')
@@ -103,19 +121,22 @@ elif args[:2] == ['api', 'graphql']:
     repo={'nameWithOwner':'acme/engine', 'parent':{'subIssues':none}}
     repo.update({alias:{'blockedBy':none} for alias in re.findall(r'(i\\d+): issue', query)})
     print(json.dumps({'data':{'repository':repo}}))
+elif args[0] == 'api':
+    print('987654')
 """)
-        self.fake("command-code", """import json, os, subprocess, sys
+        self.fake("command-code", """import json, os, re, subprocess, sys
 from pathlib import Path
 args=sys.argv[1:]
 if args[:2] == ['mcp', 'list']:
     print(os.environ.get('MCP_LIST', 'No MCP servers configured'))
     sys.exit(0)
-with open(os.environ['AGENT_LOG'], 'a') as f: f.write(json.dumps(args)+'\\n')
+with open(os.environ['AGENT_LOG'], 'a') as f:
+    __import__('fcntl').flock(f, 2)  # the epic reviewers run at once
+    f.write(json.dumps(args)+'\\n')
 prompt=args[args.index('-p')+1]
-review='You are the epic reviewer' in prompt
-ticket_review='You are the ticket reviewer' in prompt
 mode=os.environ.get('MODE', 'success')
-cap=mode in ('cap', 'cap-commit') and '--resume' not in args
+resumed=args[args.index('--resume')+1] if '--resume' in args else None
+cap=mode in ('cap', 'cap-commit') and not resumed
 def done(text, session, subtype='success', rc=0):
     print(json.dumps({'type':'result', 'subtype':subtype, 'sessionId':session, 'finalText':text}))
     sys.exit(rc)
@@ -123,6 +144,8 @@ def commit(name, text):
     Path(name).write_text(text)
     subprocess.run(['git', 'add', name], check=True)
     subprocess.run(['git', 'commit', '-qm', 'Change ' + name], check=True)
+def ids(after):
+    return re.search(after + r' ([A-Z0-9, ]+)', prompt)[1].replace(' ', '').split(',')
 if 'You are the verifier' in prompt:
     import urllib.request
     port = os.environ.get('TEST_PORT')
@@ -130,36 +153,68 @@ if 'You are the verifier' in prompt:
     if mode == 'verifier-edit': Path('work.txt').write_text('verifier edit')
     if mode == 'verifier-new-file': Path('new-runtime-output.txt').write_text('created during checks')
     if mode == 'verifier-ignored-file': Path('runtime-output.log').write_text('created during checks')
-    if mode == 'verifier-cap' and '--resume' not in args: done('', 'verify-session', 'max_turns', 8)
+    if mode == 'verifier-cap' and not resumed: done('', 'verify-session', 'max_turns', 8)
     fail = mode in ('verify-fail', 'verify-fail-always') and (mode == 'verify-fail-always' or not Path('fixed.txt').exists())
-    import re
-    path = re.search(r'(\S+/checks.md)', prompt)[1]
-    ids = re.findall(r'^- (C\d+):', Path(path).read_text(), re.M)
-    rows = [('FAILED' if fail else 'VERIFIED') + ' ' + ids[0] + ' GET / answered ' + seen]
-    rows += ['UNVERIFIABLE ' + cid + ' needs production data' for cid in ids[1:]]
+    path = re.search(r'(\\S+/checks.md)', prompt)[1]
+    checks = re.findall(r'^- (C\\d+):', Path(path).read_text(), re.M)
+    rows = [('FAILED' if fail else 'VERIFIED') + ' ' + checks[0] + ' GET / answered ' + seen]
+    rows += ['UNVERIFIABLE ' + cid + ' needs production data' for cid in checks[1:]]
     if mode == 'verifier-contradictory': rows[0] = rows[0].replace('VERIFIED', 'FAILED')
     if mode == 'verifier-missing': rows = []
     done('## RESULTS\\n' + '\\n'.join(rows) + '\\n' + ('VERIFY=FAIL' if fail else 'VERIFY=PASS'), 'verify-session')
 if 'You write the launch plan' in prompt:
-    if mode == 'plan-cap' and '--resume' not in args: done('', 'plan-session', 'max_turns', 8)
+    if mode == 'plan-cap' and not resumed: done('', 'plan-session', 'max_turns', 8)
     done('## Pre-launch checklist\\n- [x] Tests pass (verify report)\\n## Residual risk\\n- UNVERIFIABLE: needs '
          'production data\\n## Rollback plan\\n- Revert the merge commit', 'plan-session')
 if 'verify stage failed' in prompt:
-    if mode == 'repair-cap' and '--resume' not in args: done('', 'repair-session', 'max_turns', 8)
+    if mode == 'repair-cap' and not resumed: done('', 'repair-session', 'max_turns', 8)
     if mode == 'repair-protected': commit('AGENTS.md', 'changed by the repair')
     commit('other.txt' if mode == 'repair-noop' else 'fixed.txt', 'fixed')
     done('STATUS=NEEDS_HUMAN' if mode == 'repair-human' else 'STATUS=COMPLETE', 'repair-session')
-if ticket_review:
+if 'You are the repair reviewer' in prompt:
+    fail = mode == 'repair-review-fail'
+    done('## FINDINGS\\n' + ('- R1 BLOCKING fixed.txt:1 — wrong fix — cat fixed.txt' if fail else 'None.') + '\\n'
+         + ('VERDICT=FAIL' if fail else 'VERDICT=PASS'), 'repair-review-session')
+if 'You are the ticket reviewer' in prompt:
     if mode == 'review-edit': Path('work.txt').write_text('reviewer edit')
-    if mode == 'review-cap' and '--resume' not in args:
-        print(json.dumps({'type':'result', 'subtype':'max_turns', 'sessionId':'ticket-review-session', 'finalText':''}))
-        sys.exit(8)
+    if mode == 'review-cap' and not resumed: done('', 'ticket-review-session', 'max_turns', 8)
     fail=mode == 'review-fail-always' or (mode == 'review-fail-once' and 'after one fix round' not in prompt)
-    print(json.dumps({'type':'result', 'subtype':'success', 'sessionId':'ticket-review-session',
-                      'finalText':'## BLOCKING\\n' + ('- a.ts:1 wrong' if fail else 'None.') + '\\n## DEFERRED\\n'
-                                   '- old bug in b.ts:2\\n' + ('VERDICT=FAIL' if fail else 'VERDICT=PASS')}))
-    sys.exit(0)
-if not review and mode in ('parallel', 'parallel-conflict'):
+    done('## BLOCKING\\n' + ('- a.ts:1 wrong' if fail else 'None.') + '\\n## DEFERRED\\n- old bug in b.ts:2\\n'
+         + ('VERDICT=FAIL' if fail else 'VERDICT=PASS'), 'ticket-review-session')
+if 'You are an epic reviewer' in prompt:
+    letter = re.search(r'numbered ([A-Z])1', prompt)[1]
+    if mode == 'epic-cap' and letter == 'D' and not resumed: done('', 'epic-D', 'max_turns', 8)
+    found = {'D': ['- D1 DEFERRED b.ts:2 — old bug in b.ts:2 — seen in b.ts']}.get(letter, [])
+    if mode in ('fix', 'fix-not-fixed', 'fix-regression', 'dispute', 'writer-bad') and letter == 'D':
+        found.append('- D2 BLOCKING a.ts:1 — the total counts twice — a.ts:1 adds it again')
+    if mode in ('fix', 'fix-not-fixed', 'fix-regression', 'writer-bad') and letter == 'G':
+        found.append('- G1 BLOCKING a.ts:1 — the total is wrong — a.ts:1')
+    if mode == 'self-withdraw': found = ['- %s1 BLOCKING a.ts:1 — maybe wrong — guessed' % letter]
+    blocking = any('BLOCKING' in f for f in found) and mode != 'review-contradict'
+    if mode == 'review-contradict': found.append('- %s9 BLOCKING z.ts:1 — broken — z.ts:1' % letter)
+    done('## INTEGRATION\\nThe tickets fit.\\n## FINDINGS\\n' + ('\\n'.join(found) or 'None.') + '\\n'
+         + ('VERDICT=FIX-FIRST' if blocking else 'VERDICT=SHIP'), 'epic-' + letter)
+if 'Cross-examination' in prompt or 'Self-check for epic' in prompt:
+    verb = 'DISPUTED' if mode == 'dispute' else 'WITHDRAWN' if mode == 'self-withdraw' else 'CONFIRMED'
+    answers = [] if mode == 'cross-missing' else ['- %s %s a.ts:1 shows it' % (i, verb) for i in ids('exactly once:')]
+    done('## ANSWERS\\n' + '\\n'.join(answers) + '\\n## WITHDRAWN\\nNone.\\nCHECK=DONE', resumed or 'check-session')
+if 'You are the ticket writer' in prompt:
+    drafts = Path(re.search(r'its own file (\\S+)/NN-short-slug.md', prompt)[1])
+    confirmed = re.findall(r'^- ([A-Z]\\d+) BLOCKING', prompt, re.M)
+    if mode == 'writer-bad': confirmed = confirmed[:1]
+    (drafts / '01-fix-the-total.md').write_text(
+        '# Fix the total\\n## What to build\\nCount the total once.\\n## Acceptance criteria\\n- [ ] Counted once\\n'
+        '## Verification\\n- [ ] Tests: npm test\\n## Files likely touched\\n- a.ts\\n## Scope\\nXS\\n'
+        '## Blocked by\\nNone\\n## Findings\\n' + ', '.join(confirmed) + '\\n')
+    done('STATUS=COMPLETE', resumed or 'writer-session')
+if 'Follow-up review for epic' in prompt:
+    letter = re.search(r'numbered on from ([A-Z])', prompt)[1]
+    verb = 'NOT FIXED' if mode == 'fix-not-fixed' else 'FIXED'
+    fixes = ['- %s %s a.ts:1 counts once' % (i, verb) for i in ids('IDs:')]
+    new = ['- D3 BLOCKING c.ts:1 — the fix crashes — c.ts:1'] if mode == 'fix-regression' and letter == 'D' else []
+    done('## FIXES\\n' + '\\n'.join(fixes) + '\\n## FINDINGS\\n' + ('\\n'.join(new) or 'None.') + '\\nFOLLOW-UP=DONE',
+         resumed or 'follow-session')
+if mode in ('parallel', 'parallel-conflict'):
     if 'stopped with conflicts' in prompt:
         Path('shared.txt').write_text('209 and 210\\n')
         subprocess.run(['git', 'add', 'shared.txt'], check=True)
@@ -180,28 +235,25 @@ if not review and mode in ('parallel', 'parallel-conflict'):
             time.sleep(.02)
     commit('shared.txt' if mode == 'parallel-conflict' else 'ticket-' + number + '.txt', number)
     done('STATUS=COMPLETE', 'ticket-session')
-if not review:
-    if os.environ.get('PROBE'):
-        with open(os.environ['PROBE'], 'a') as f:
-            f.write(json.dumps({'link': os.path.islink('local.cfg'), 'deps': os.path.exists('deps/lib.txt')}) + '\\n')
-    if mode == 'edit-config': Path(os.environ['ROOT'], '.agents/ticket-runner.json').write_text('{}')
-    if mode == 'commit-config':
-        Path('.agents/ticket-runner.json').write_text('{"gate": ["false"]}')
-        subprocess.run(['git', 'add', '.agents/ticket-runner.json'], check=True)
-    Path('work.txt').write_text('partial' if cap else str(len(Path(os.environ['AGENT_LOG']).read_text())))
-    if not cap or mode == 'cap-commit':
-        subprocess.run(['git', 'add', 'work.txt'], check=True)
-        subprocess.run(['git', 'commit', '-qm', 'Implement ticket'], check=True)
+if os.environ.get('PROBE'):
+    with open(os.environ['PROBE'], 'a') as f:
+        f.write(json.dumps({'link': os.path.islink('local.cfg'), 'deps': os.path.exists('deps/lib.txt')}) + '\\n')
+if mode == 'edit-config': Path(os.environ['ROOT'], '.agents/ticket-runner.json').write_text('{}')
+if mode == 'commit-config':
+    Path('.agents/ticket-runner.json').write_text('{"gate": ["false"]}')
+    subprocess.run(['git', 'add', '.agents/ticket-runner.json'], check=True)
+Path('work.txt').write_text('partial' if cap else str(len(Path(os.environ['AGENT_LOG']).read_text())))
+if not cap or mode == 'cap-commit':
+    subprocess.run(['git', 'add', 'work.txt'], check=True)
+    subprocess.run(['git', 'commit', '-qm', 'Implement ticket'], check=True)
 if mode == 'empty': sys.exit(0)
 if mode == 'error':
     print(json.dumps({'type':'result', 'subtype':'error', 'finalText':'STATUS=COMPLETE'}))
     sys.exit(6)
-text=('## DEFERRED\\n- old bug in b.ts:2\\n' + ('VERDICT=FIX-FIRST' if mode == 'fix' else 'VERDICT=SHIP')) if review else 'STATUS=COMPLETE'
-if mode == 'missing': text='Finished the work'
-if mode == 'human' and not review: text='STATUS=NEEDS_HUMAN'
+text = 'Finished the work' if mode == 'missing' else 'STATUS=NEEDS_HUMAN' if mode == 'human' else 'STATUS=COMPLETE'
 print(json.dumps({'type':'event', 'event':{'type':'tool_running'}}))
-print(json.dumps({'type':'result', 'subtype':'max_turns' if cap else 'success',
-                  'sessionId':'review-session' if review else 'ticket-session', 'finalText':text}))
+print(json.dumps({'type':'result', 'subtype':'max_turns' if cap else 'success', 'sessionId':'ticket-session',
+                  'finalText':text}))
 sys.exit(8 if cap else 0)
 """)
         skill = self.root / "skill.md"
@@ -212,7 +264,8 @@ sys.exit(8 if cap else 0)
             (self.skills / name / "SKILL.md").write_text(f"# {name}\nSee ../../references/definition-of-done.md\n")
         (self.root / "references").mkdir()
         (self.root / "references" / "definition-of-done.md").write_text("Done means done.\n")
-        (self.root / ".gitignore").write_text("fake-bin/\n*.log\nskill.md\nskills/\nreferences/\nprs.json\n")
+        (self.root / ".gitignore").write_text("fake-bin/\n*.log\nskill.md\nskills/\nreferences/\nprs.json\n"
+                                            "issues.json\n")
         (self.root / "AGENTS.md").write_text("# Agents\n")
         self.git("add", ".gitignore", "AGENTS.md")
         self.git("commit", "-qm", "Test setup")
@@ -225,7 +278,8 @@ sys.exit(8 if cap else 0)
                         COMMANDCODE_BIN=str(self.bin / "command-code"), IMPLEMENT_SKILL=str(skill),
                         AGENT_SKILLS_DIR=str(self.skills), PARENT_BODY="## Checkpoint: after #210\n- [ ] Tests pass",
                         CALL_LOG=str(self.root / "gh.log"), AGENT_LOG=str(self.root / "agents.log"),
-                        ROOT=str(self.root), PR_STATE=str(self.root / "prs.json"))
+                        ROOT=str(self.root), PR_STATE=str(self.root / "prs.json"),
+                        ISSUE_STATE=str(self.root / "issues.json"))
         for name in ('IMPL_MODEL', 'IMPL_EFFORT', 'IMPL_MAX_TURNS', 'EPIC_REVIEW_MODEL', 'EPIC_REVIEW_EFFORT', 'EPIC_REVIEW_MAX_TURNS',
                      'WORKFLOW', 'TICKET_REVIEW_MODEL', 'TICKET_REVIEW_EFFORT', 'TICKET_REVIEW_MAX_TURNS',
                      'VERIFY_MODEL', 'VERIFY_EFFORT', 'VERIFY_MAX_TURNS', 'GATE_CMDS', 'INSTALL_CMD',
@@ -279,12 +333,14 @@ sys.exit(8 if cap else 0)
     def calls(self):
         return [json.loads(line) for line in (self.root / "agents.log").read_text().splitlines()]
 
+    KINDS = (('You are the verifier', 'verifier'), ('verify stage failed', 'repair'),
+             ('You are the repair reviewer', 'repair review'), ('You write the launch plan', 'launch plan'),
+             ('You are an epic reviewer', 'epic review'), ('Cross-examination', 'cross'), ('Self-check for epic', 'cross'),
+             ('You are the ticket writer', 'ticket writer'), ('Follow-up review for epic', 'follow-up'),
+             ('You are the ticket reviewer', 'ticket review'))
+
     def kinds(self):
-        return ['verifier' if 'You are the verifier' in self.prompt(c) else
-                'repair' if 'verify stage failed' in self.prompt(c) else
-                'launch plan' if 'You write the launch plan' in self.prompt(c) else
-                'epic review' if 'You are the epic reviewer' in self.prompt(c) else
-                'ticket review' if 'You are the ticket reviewer' in self.prompt(c) else 'implement'
+        return [next((kind for marker, kind in self.KINDS if marker in self.prompt(c)), 'implement')
                 for c in self.calls()]
 
     def call(self, kind, index=-1):
@@ -293,19 +349,29 @@ sys.exit(8 if cap else 0)
     def prs(self):
         return json.loads((self.root / "prs.json").read_text())
 
-    def test_default_implements_in_order_then_sonnet_reviews(self):
+    def test_default_implements_in_order_then_deepseek_and_glm_cross_examine(self):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'launch plan'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'launch plan'])
         self.assertEqual(calls[0][calls[0].index('-m')+1], 'deepseek/deepseek-v4.1-flash')
-        self.assertEqual(self.model(self.call('epic review')), 'claude-sonnet-5-5')
+        self.assertEqual({self.model(self.call('epic review', i)) for i in (0, 1)},
+                         {'deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3-flash'})
+        cross = self.call('cross')  # Only glm has a finding of deepseek's to answer.
+        self.assertEqual((self.model(cross), cross[cross.index('--resume')+1]), ('z-ai/glm-5.3-flash', 'epic-G'))
+        self.assertIn('exactly once: D1', self.prompt(cross))
         self.assertEqual(self.model(self.call('launch plan')), 'deepseek/deepseek-v4.1-flash')
         self.assertEqual(calls[0][calls[0].index('--max-turns')+1], '500')
-        self.assertEqual(self.state()['210']['status'], 'done')
-        self.assertEqual(self.state()['_review']['status'], 'ship')
+        state = self.state()
+        self.assertEqual(state['210']['status'], 'done')
+        self.assertEqual(state['_review']['status'], 'ship')
+        self.assertEqual(state['_review']['findings']['D1']['outcome'], 'confirmed')
+        closes = [c[:3] for c in self.gh_calls() if c[:2] == ['issue', 'close']]
+        self.assertEqual(closes, [['issue', 'close', '209'], ['issue', 'close', '210']])
+        self.assertNotIn(['issue', 'close', '207'], closes)  # The epic stays open.
         self.assertEqual(self.run_script('--resume').returncode, 0)
-        self.assertEqual(len(self.calls()), 4)  # Every stage still holds for this head.
+        self.assertEqual(len(self.calls()), 6)  # Every stage still holds for this head.
+        self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['issue', 'close']]), 2)
 
     def check_cap_resume(self, mode):
         failed = self.run_script(mode=mode)
@@ -392,13 +458,10 @@ sys.exit(8 if cap else 0)
         self.assertEqual(len(self.calls()), 1)
         self.assertNotIn('_review', self.state())
 
-    def test_epic_only_rejects_unfinished_epic_and_fix_first_fails(self):
+    def test_epic_only_rejects_unfinished_epic(self):
         result = self.run_script('--epic-only')
         self.assertEqual(result.returncode, 1)
         self.assertFalse((self.root / 'agents.log').exists())
-        result = self.run_script(mode='fix')
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(self.state()['_review']['status'], 'fix-first')
 
     def test_dirty_tree_is_preserved_and_invalid_budget_rejected(self):
         (self.root / 'unrelated.txt').write_text('user work')
@@ -417,7 +480,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
         self.assertEqual(self.kinds(), ['implement', 'ticket review', 'implement', 'ticket review', 'epic review',
-                                        'launch plan'])
+                                        'epic review', 'cross', 'launch plan'])
         # Odd #209 gets the second model (glm), even #210 the first (luna); both review at high.
         self.assertEqual(self.model(calls[1]), 'z-ai/glm-5.3-flash')
         self.assertEqual(self.model(calls[3]), 'gpt-6-luna')
@@ -440,7 +503,7 @@ sys.exit(8 if cap else 0)
         comments = [c for c in self.gh_calls() if c[:2] == ['issue', 'comment']]
         self.assertEqual(len(comments), 1)
         self.assertEqual(comments[0][2], '207')
-        self.assertIn('old bug in b.ts:2', (self.root / '.scratch/run-tickets-commandcode/207/review/deferred.md').read_text())
+        self.assertIn('old bug in b.ts:2', (self.root / '.scratch/run-tickets-commandcode/207/review/findings.md').read_text())
         self.assertEqual(self.run_osmani('--epic-only').returncode, 0)
         self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['issue', 'comment']]), 1)  # Same head: not reposted.
 
@@ -543,7 +606,7 @@ sys.exit(8 if cap else 0)
         result = self.run_osmani('--epic-only')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.state()['_meta']['workflow'], 'osmani')
-        self.assertIn('Every ticket passed its own ticket review', self.prompt(self.call('epic review')))
+        self.assertEqual(self.kinds().count('epic review'), 4)  # A SHIP under pocock does not hold for osmani.
 
 
     # ── project config + generic prompts ─────────────────────────────────
@@ -603,7 +666,7 @@ sys.exit(8 if cap else 0)
         self.git("commit", "-qam", "Runner notes")
         self.issues.append({"number": 211, "title": "Third", "body": planned("Third slice"), "state": "OPEN"})
         self.assertEqual(self.run_osmani().returncode, 0)
-        self.assertIn('The `## Ticket Runner` section of AGENTS.md lists', self.prompt(self.calls()[-3]))
+        self.assertIn('The `## Ticket Runner` section of AGENTS.md lists', self.prompt(self.call('implement')))
 
 
     # ── verify stage ─────────────────────────────────────────────────────
@@ -763,7 +826,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(artifact.read_text(), 'created during checks')
         self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
         self.assertTrue(artifact.exists())
-        self.assertNotIn('_review', self.state())
+        self.assertNotIn('_ship', self.state())
 
     def test_verifier_contradictory_and_missing_results_are_rejected(self):
         self.serve()
@@ -772,7 +835,7 @@ sys.exit(8 if cap else 0)
                 result = self.run_script('--no-ship', mode=mode)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.state()['_verify']['status'], 'needs-human')
-                self.assertNotIn('_review', self.state())
+                self.assertNotIn('_ship', self.state())
 
     def test_new_verify_worktree_provisions_links(self):
         with (self.root / '.gitignore').open('a') as out: out.write('.env\n')
@@ -782,13 +845,13 @@ sys.exit(8 if cap else 0)
         result = self.run_script('--no-ship')
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_changed_runtime_inputs_invalidate_all_stages(self):
+    def test_changed_runtime_inputs_invalidate_verify_and_ship_but_not_the_review(self):
         self.serve()
         self.assertEqual(self.run_script().returncode, 0)
         before = len(self.calls())
         with (self.root / '.env.verify').open('a') as out: out.write('NEW_SECRET=secret-regression-value\n')
         self.assertEqual(self.run_script('--epic-only').returncode, 0)
-        self.assertEqual(self.kinds()[before:], ['verifier', 'epic review', 'launch plan'])
+        self.assertEqual(self.kinds()[before:], ['verifier', 'launch plan'])
         self.assertNotIn('secret-regression-value', json.dumps(self.state()))
 
     def test_closed_cached_pull_request_requires_attention(self):
@@ -823,7 +886,7 @@ sys.exit(8 if cap else 0)
         self.env["TEST_PORT"] = str(port)
         return port
 
-    def test_verify_commands_pass_and_the_epic_review_gets_the_report(self):
+    def test_verify_commands_pass_after_the_epic_review(self):
         self.configure(verify=["echo first", "echo second"])
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -835,8 +898,8 @@ sys.exit(8 if cap else 0)
         report = (self.verify_dir() / 'report.md').read_text()
         self.assertIn('PASS `echo first`', report)
         self.assertIn('skipped: no `serve`', report)
-        self.assertIn(str(self.verify_dir() / 'report.md'), self.prompt(self.call('epic review')))
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'launch plan'])
+        self.assertNotIn(str(self.verify_dir() / 'report.md'), self.prompt(self.call('epic review')))
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'launch plan'])
         self.assertFalse((self.root / '.scratch/worktrees/verify').exists())
         self.assertEqual(self.git('branch', '--list', 'cc/207/verify'), '')
 
@@ -844,8 +907,9 @@ sys.exit(8 if cap else 0)
         self.configure(verify=["test -f fixed.txt"], gate=["true"])
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair', 'epic review', 'launch plan'])
-        repair = self.calls()[2]
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'repair',
+                                        'repair review', 'launch plan'])
+        repair = self.call('repair')
         self.assertIn(str(self.skills / 'debugging-and-error-recovery' / 'SKILL.md'), self.prompt(repair))
         self.assertIn('$ test -f fixed.txt', self.prompt(repair))
         self.assertEqual(self.model(repair), 'deepseek/deepseek-v4.1-flash')
@@ -856,16 +920,26 @@ sys.exit(8 if cap else 0)
         self.assertTrue(state['_verify']['repaired'])
         self.assertTrue((self.verify_dir() / 'gate-1.log').exists())
         self.assertIn('one repair round ran', (self.verify_dir() / 'report.md').read_text())
+        # glm, the last epic reviewer, reads only the repair; the SHIP then covers the repaired head.
+        review = self.call('repair review')
+        self.assertEqual(self.model(review), 'z-ai/glm-5.3-flash')
+        tip = state['_review']['head']
+        self.assertIn(f'git diff\n{tip}..HEAD', self.prompt(review))
+        self.assertEqual(state['_verify']['repairReview']['status'], 'pass')
+        self.assertEqual((state['_verify']['repairReview']['base'], state['_verify']['repairReview']['head']),
+                         (tip, self.git('rev-parse', 'HEAD')))
+        self.assertEqual(state['_ship']['head'], self.git('rev-parse', 'HEAD'))
 
-    def test_verify_still_failing_needs_a_human_and_skips_the_epic_review(self):
+    def test_verify_still_failing_needs_a_human_and_holds_the_ship(self):
         self.configure(verify=["test -f fixed.txt"], gate=["true"])
         result = self.run_script(mode='repair-noop')
         self.assertEqual(result.returncode, 1)
         state = self.state()
         self.assertEqual(state['_verify']['status'], 'needs-human')
         self.assertIn('still fails after one repair', state['_verify']['reason'])
-        self.assertNotIn('_review', state)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair'])
+        self.assertEqual(state['_review']['status'], 'ship')
+        self.assertNotIn('_ship', state)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'repair'])
         wt = self.root / '.scratch/worktrees/verify'
         self.assertTrue((wt / 'other.txt').exists())
         self.assertFalse((self.root / 'other.txt').exists())
@@ -877,7 +951,8 @@ sys.exit(8 if cap else 0)
         subprocess.run(['git', 'commit', '-qm', 'Fix by hand'], cwd=wt, check=True)
         result = self.run_script('--epic-only')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair', 'epic review', 'launch plan'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'repair',
+                                        'repair review', 'launch plan'])
         self.assertEqual((self.root / 'fixed.txt').read_text(), 'by hand')
 
     def test_verify_repair_touching_a_protected_file_is_not_merged(self):
@@ -891,8 +966,9 @@ sys.exit(8 if cap else 0)
         port = self.serve()
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'verifier', 'epic review', 'launch plan'])
-        verifier = self.calls()[2]
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'verifier',
+                                        'launch plan'])
+        verifier = self.call('verifier')
         self.assertEqual(self.model(verifier), 'gpt-6-luna')
         self.assertEqual(verifier[verifier.index('--effort')+1], 'high')
         self.assertNotIn('--tools-enable', verifier)
@@ -911,9 +987,9 @@ sys.exit(8 if cap else 0)
         self.serve(verify=["echo built"])
         result = self.run_script(mode='verify-fail')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'verifier', 'repair', 'verifier', 'epic review',
-                                        'launch plan'])
-        self.assertIn('FAILED runtime checks', self.prompt(self.calls()[3]))
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'verifier',
+                                        'repair', 'verifier', 'repair review', 'launch plan'])
+        self.assertIn('FAILED runtime checks', self.prompt(self.call('repair')))
         self.assertTrue((self.root / 'fixed.txt').exists())
 
     def test_an_app_that_never_gets_ready_is_repaired_once_then_needs_a_human(self):
@@ -925,7 +1001,7 @@ sys.exit(8 if cap else 0)
                        serveEnv=".env.verify", gate=["true"])
         result = self.run_script()
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'repair'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'repair'])
         self.assertIn('The app did not start for the runtime checks', self.prompt(self.call('repair')))
         self.assertEqual(self.state()['_verify']['status'], 'needs-human')
         self.assertIn('still fails after one repair', self.state()['_verify']['reason'])
@@ -957,7 +1033,7 @@ sys.exit(8 if cap else 0)
         self.env["MCP_LIST"] = "chrome-devtools: npx -y chrome-devtools-mcp@latest --isolated - Connected"
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
-        verifier = self.calls()[2]
+        verifier = self.call('verifier')
         self.assertIn('mcp__chrome-devtools__navigate_page', verifier[verifier.index('--tools-enable')+1])
         self.assertIn(str(self.skills / 'browser-testing-with-devtools' / 'SKILL.md'), self.prompt(verifier))
         self.assertNotIn('--tools-enable', self.calls()[0])
@@ -976,7 +1052,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.state()['_verify']['status'], 'turn-cap')
         result = self.run_script('--resume', '--epic-only', mode='verifier-cap')
         self.assertEqual(result.returncode, 0, result.stderr)
-        resumed = self.calls()[3]
+        resumed = self.call('verifier')
         self.assertEqual(resumed[resumed.index('--resume')+1], 'verify-session')
 
     def test_interrupted_verify_repair_resumes_its_session(self):
@@ -985,7 +1061,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.state()['_verify']['status'], 'turn-cap')
         result = self.run_script('--resume', '--epic-only', mode='repair-cap')
         self.assertEqual(result.returncode, 0, result.stderr)
-        resumed = self.calls()[3]
+        resumed = self.call('repair')
         self.assertIn('verify stage failed', self.prompt(resumed))
         self.assertEqual(resumed[resumed.index('--resume')+1], 'repair-session')
         self.assertTrue((self.root / 'fixed.txt').exists())
@@ -1079,12 +1155,12 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.state()['_ship']['status'], 'needs-human')
         self.assertIn('CI is red', self.state()['_ship']['reason'])
         self.assertFalse([c for c in self.gh_calls() if c[:2] == ['pr', 'merge']])
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'launch plan'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'launch plan'])
 
-    def test_no_ship_stops_after_the_epic_review(self):
+    def test_no_ship_stops_before_the_ship_stage(self):
         result = self.run_script('--no-ship')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross'])
         self.assertIsNone(self.remote_head())
 
     def test_no_verify_is_named_in_the_launch_plan_and_the_pull_request(self):
@@ -1093,7 +1169,6 @@ sys.exit(8 if cap else 0)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('_verify', self.state())
         self.assertIn('verify skipped', self.prompt(self.call('launch plan')))
-        self.assertIn('was skipped for this run', self.prompt(self.call('epic review')))
         self.assertIn('Verify skipped (--no-verify).', self.prs()[0]['body'])
 
     def test_interrupted_launch_plan_resumes_its_session(self):
@@ -1106,6 +1181,132 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.state()['_ship']['status'], 'pr-open')
 
 
+    # ── epic review ──────────────────────────────────────────────────────
+
+    def created_issues(self):
+        path = self.root / "issues.json"
+        return json.loads(path.read_text())['created'] if path.exists() else []
+
+    def test_confirmed_blocking_findings_become_fix_tickets_then_one_follow_up_ships(self):
+        result = self.run_script(mode='fix')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'cross',
+                                        'ticket writer', 'implement', 'follow-up', 'follow-up', 'launch plan'])
+        writer = self.call('ticket writer')  # deepseek, the first reviewer, in its own session
+        self.assertEqual((self.model(writer), writer[writer.index('--resume')+1]),
+                         ('deepseek/deepseek-v4.1-flash', 'epic-D'))
+        self.assertIn(str(self.skills / 'to-tickets' / 'SKILL.md'), self.prompt(writer))
+        self.assertIn('skip every\nstep that asks the user', self.prompt(writer))
+        [issue] = self.created_issues()
+        self.assertEqual((issue['number'], issue['title']), (400, 'Fix the total'))
+        for text in ('## Parent\n#207', '## Acceptance criteria', '## Findings\nD2, G1', 'draft 01 -->'):
+            self.assertIn(text, issue['body'])
+        self.assertIn(['issue', 'edit', '400', '--add-label', 'epic-review-fix'], self.gh_calls())
+        self.assertIn('#400', self.prompt(self.call('implement')))  # The fix ticket ran like any ticket.
+        follow = self.call('follow-up')
+        self.assertIn('IDs: D2, G1', self.prompt(follow))
+        state = self.state()
+        self.assertEqual(state['400']['status'], 'done')
+        review = state['_review']
+        self.assertEqual((review['status'], review['fixTickets'], review['head']),
+                         ('ship', [400], self.git('rev-parse', 'HEAD')))
+        self.assertNotEqual(review['start'], review['head'])
+        closes = sorted(int(c[2]) for c in self.gh_calls() if c[:2] == ['issue', 'close'])
+        self.assertEqual(closes, [209, 210, 400])
+        report = (self.root / '.scratch/run-tickets-commandcode/207/review/report.md').read_text()
+        self.assertIn('- D2 (deepseek) a.ts:1', report)
+        self.assertIn('glm: FIXED a.ts:1 counts once', report)
+        self.assertIn('- #400 Fix the total', self.prs()[0]['body'])
+        # Same head: nothing reruns, nothing is filed or closed again.
+        self.assertEqual(self.run_script('--epic-only', mode='fix').returncode, 0)
+        self.assertEqual(len(self.created_issues()), 1)
+        self.assertEqual(self.kinds().count('epic review'), 2)
+
+    def test_a_fix_ticket_still_not_fixed_after_the_follow_up_needs_a_human(self):
+        result = self.run_script(mode='fix-not-fixed')
+        self.assertEqual(result.returncode, 1)
+        review = self.state()['_review']
+        self.assertEqual(review['status'], 'needs-human')
+        self.assertIn('still not fixed after the fix tickets: D2, G1', review['reason'])
+        self.assertFalse([c for c in self.gh_calls() if c[:2] == ['issue', 'close']])
+        self.assertNotIn('launch plan', self.kinds())
+        before = len(self.calls())
+        self.assertEqual(self.run_script('--epic-only', mode='fix-not-fixed').returncode, 1)
+        self.assertEqual(len(self.calls()), before)  # Same head: still blocked, no agent asked again.
+
+    def test_a_regression_the_fixes_introduce_needs_a_human(self):
+        result = self.run_script(mode='fix-regression')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('the fixes introduced: D3', self.state()['_review']['reason'])
+        self.assertIn('Cross-examination of the follow-up review', self.prompt(self.call('cross')))
+
+    def test_a_disputed_finding_never_blocks_and_reaches_the_pull_request(self):
+        result = self.run_script(mode='dispute')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('ticket writer', self.kinds())
+        self.assertEqual(self.state()['_review']['findings']['D2']['outcome'], 'disputed')
+        body = self.prs()[0]['body']
+        self.assertIn('## Disputed findings', body)
+        self.assertIn('the total counts twice — a.ts:1 adds it again — disputed by glm', body)
+        posted = (self.root / '.scratch/run-tickets-commandcode/207/review/findings.md').read_text()
+        self.assertIn('## Disputed findings', posted)
+
+    def test_a_single_reviewer_checks_itself_and_withdrawn_findings_never_block(self):
+        result = self.run_script('--epic-review-model', 'glm', mode='self-withdraw')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'cross', 'launch plan'])
+        check = self.call('cross')
+        self.assertIn('Self-check for epic #207', self.prompt(check))
+        self.assertEqual(check[check.index('--resume')+1], 'epic-G')
+        self.assertEqual(self.state()['_review']['findings']['G1']['outcome'], 'withdrawn')
+
+    def test_epic_reviewers_are_one_or_two_different_models(self):
+        for models in ('flash,deepseek', 'flash,glm,luna', ''):
+            with self.subTest(models=models):
+                result = self.run_script('--dry-run', '--epic-review-model', models)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('one or two different models', result.stderr)
+        result = self.run_script('--dry-run', '--epic-review-model', 'claude')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('epic review  claude-sonnet-5-5, self-checked', result.stdout)
+        self.assertIn('the epic review shares deepseek/deepseek-v4.1-flash with the implementer',
+                      self.run_script('--dry-run').stderr)
+
+    def test_unusable_epic_review_reports_need_a_human(self):
+        for mode, expected in (('review-contradict', 'contradictory report'), ('cross-missing', 'must answer each of D1'),
+                               ('writer-bad', 'must appear in exactly one draft')):
+            with self.subTest(mode=mode):
+                self.setUp()
+                result = self.run_script(mode=mode)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(self.state()['_review']['status'], 'needs-human')
+                self.assertIn(expected, self.state()['_review']['reason'])
+                self.assertFalse(self.created_issues())
+
+    def test_interrupted_epic_reviewer_resumes_its_own_session(self):
+        self.assertEqual(self.run_script(mode='epic-cap').returncode, 1)
+        self.assertEqual(self.state()['_review']['status'], 'turn-cap')
+        result = self.run_script('--resume', '--epic-only', mode='epic-cap')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rounds = [c for c, k in zip(self.calls(), self.kinds()) if k == 'epic review']
+        self.assertEqual(len(rounds), 3)  # glm's finished review is kept; only deepseek resumes.
+        self.assertEqual(rounds[-1][rounds[-1].index('--resume')+1], 'epic-D')
+
+    def test_a_failed_repair_review_keeps_the_repair_out_of_the_epic(self):
+        self.configure(verify=["test -f fixed.txt"], gate=["true"])
+        result = self.run_script(mode='repair-review-fail')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('repair review found blocking problems', self.state()['_verify']['reason'])
+        self.assertFalse((self.root / 'fixed.txt').exists())
+        self.assertNotIn('_ship', self.state())
+
+    def test_merge_needs_the_repair_review_to_carry_the_ship_verdict(self):
+        self.configure(verify=["test -f fixed.txt"], gate=["true"])
+        result = self.run_script('--merge')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()['_ship']['status'], 'merged')
+        self.assertNotEqual(self.state()['_review']['head'], self.git('rev-parse', 'HEAD'))
+
     # ── stage bookkeeping ────────────────────────────────────────────────
 
     def test_stages_skip_while_valid_and_rerun_for_a_new_head(self):
@@ -1113,7 +1314,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.run_script().returncode, 0)
         result = self.run_script('--epic-only')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(self.calls()), 4)
+        self.assertEqual(len(self.calls()), 6)
         self.assertIn('Verify stage already passed', result.stdout)
         self.assertIn('Epic review already said SHIP', result.stdout)
         self.assertIn('already up to date', result.stdout)
@@ -1121,20 +1322,19 @@ sys.exit(8 if cap else 0)
         self.issues.append({"number": 211, "title": "Third slice", "body": "Parent #207", "state": "OPEN"})
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'launch plan',
-                                        'implement', 'epic review', 'launch plan'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'launch plan',
+                                        'implement', 'epic review', 'epic review', 'cross', 'launch plan'])
         head = self.git('rev-parse', 'HEAD')
         state = self.state()
         self.assertNotEqual(first['_verify']['head'], head)
         self.assertEqual([state[k]['head'] for k in ('_verify', '_review', '_ship')], [head] * 3)
 
-    def test_a_verify_result_that_arrives_later_invalidates_an_unverified_review(self):
+    def test_a_later_verify_does_not_repeat_the_epic_review(self):
         self.configure(verify=["true"])
         self.assertEqual(self.run_script('--no-verify', '--no-ship').returncode, 0)
-        self.assertIsNone(self.state()['_review']['verified'])
         self.assertEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
-        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review'])
-        self.assertEqual(self.state()['_review']['verified'], self.state()['_verify']['fingerprint'])
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross'])
+        self.assertEqual(self.state()['_verify']['status'], 'pass')
 
     def test_skip_flag_combinations(self):
         result = self.run_script('--epic-only', '--no-verify', '--no-epic-review')
@@ -1151,13 +1351,15 @@ sys.exit(8 if cap else 0)
         result = self.run_script('--dry-run', '--merge')
         self.assertEqual(result.returncode, 0, result.stderr)
         for line in ('tickets      2 to run', 'verify       2 command(s); runtime checks off (no serve)',
-                     'epic review  claude-sonnet-5-5',
-                     'ship         launch plan, push, pull request into master; then --merge (merge)'):
+                     'epic review  deepseek/deepseek-v4.1-flash + z-ai/glm-5.3-flash, cross-examined',
+                     'ship         launch plan (deepseek/deepseek-v4.1-flash), push, pull request into master; '
+                     'then --merge (merge)'):
             self.assertIn(line, result.stdout)
         result = self.run_script('--dry-run', '--no-verify', '--no-ship')
         self.assertIn('verify       skipped (--no-verify)', result.stdout)
         self.assertIn('ship         skipped (--no-ship)', result.stdout)
-        self.assertIn('verify, epic review, ship: skipped (--only)', self.run_script('--dry-run', '--only', '209').stdout)
+        self.assertIn('epic review, verify, ship: skipped (--only)', self.run_script('--dry-run', '--only', '209').stdout)
+        self.assertLess(result.stdout.index('epic review'), result.stdout.index('verify  '))
 
     def test_pocock_checks_the_skills_of_its_enabled_stages(self):
         shutil.rmtree(self.skills / "shipping-and-launch")

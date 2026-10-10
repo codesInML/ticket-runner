@@ -1,6 +1,6 @@
 """Skill guidance and stage prompt construction."""
 
-from .settings import BROWSER_SERVER, BROWSER_SKILL
+from .settings import BROWSER_SERVER, BROWSER_SKILL, TICKET_WRITING_SKILLS
 
 
 class Prompts:
@@ -104,24 +104,118 @@ Use only CommandCode for agent work; do not invoke codex or claude CLIs.
 End with exactly one line: VERIFY=FAIL when any check is FAILED, otherwise VERIFY=PASS.
 """
 
-    def epic_brief(self):
-        s = self.skill_file
-        reports = sorted(self.folder.glob("*/review/round-*/final.txt"))
-        listed = "\n".join(f"  {r}" for r in reports) or "  (none found)"
-        return f"""{self.domain()}Follow {s('code-review-and-quality')} across that whole diff; load {s('security-and-hardening')}
+    READ_ONLY = """Read-only: do not edit files, commit, change branches, push, or post comments.
+Use only CommandCode for agent work; do not invoke codex or claude CLIs.
+"""
+
+    def epic_review_prompt(self, rv, r):
+        """Round one: one reviewer, on its own, over the whole epic diff."""
+        s, reviewers, base = self.skill_file, rv["reviewers"], self.data["_meta"]["epicBase"]
+        reports = sorted(self.folder.glob("*/review/round-*/final.txt")) if self.osmani else []
+        tickets = (f"Every ticket passed its own ticket review; the reports are:\n"
+                   + "\n".join(f"  {path}" for path in reports) + "\nTheir DEFERRED findings are real defects that "
+                   "no ticket owned: carry each one that still holds into FINDINGS as DEFERRED.\n") if reports else ""
+        checked = ("Another reviewer reviews the same diff on its own; afterwards each of you checks the other's\n"
+                   "findings against the code, so report only what you can point at.\n") if len(reviewers) > 1 else \
+            "Afterwards you re-check each finding against the code, so report only what you can point at.\n"
+        return f"""You are an epic reviewer for epic #{self.a.parent}. Someone else wrote this code; take none of its claims on trust.
+Read AGENTS.md, the parent spec with gh issue view {self.a.parent}, and each ticket in {self.order}.
+Review git diff {base}..{rv['start']} and git log {base}..{rv['start']} as a whole.
+{self.domain()}Follow {s('code-review-and-quality')} across that whole diff; load {s('security-and-hardening')}
 only when the epic touches auth, untrusted input or personal or sensitive data, and
 {s('performance-optimization')} only when it touches a performance-sensitive area.
-Every ticket passed its own ticket review; the reports are:
-{listed}
-Their DEFERRED findings are real defects that no ticket owned.
-Report under these markdown headings, in order, citing file and line for each actionable finding:
-## INTEGRATION: how the slices fit together.
+{tickets}{checked}Report under these markdown headings, in order:
+## INTEGRATION: how the tickets fit together.
 ## EPIC SPEC: every parent requirement MET or UNMET, with evidence.
 ## CHECKPOINTS: every checkpoint in the parent plan MET or UNMET, with evidence.
-## DEFECTS: real correctness and security defects.
-## DEFERRED: the ticket reviews' DEFERRED findings consolidated. Merge duplicates, drop any the epic has
-since fixed, confirm the rest still hold, and add any of your own that no ticket owns. Write "None." when
-nothing remains. The runner posts this section on #{self.a.parent} as written.
-Read-only review: do not edit files, commit, change branches, push, or post comments.
-Use only CommandCode for agent work.
+## FINDINGS: one line per finding, numbered {r['letter']}1, {r['letter']}2 and so on, in exactly this shape:
+- {r['letter']}1 BLOCKING path/to/file.ts:42 — what is wrong — the evidence (the code quoted, or a command and its output)
+BLOCKING is a real correctness or security defect in this epic, a broken integration between tickets, or
+an UNMET requirement or checkpoint. DEFERRED is a real defect the epic does not own: pre-existing code, or
+out of the epic's scope. Style and taste are not findings. Write "None." when there are none.
+{self.READ_ONLY}End with exactly one line: VERDICT=SHIP when nothing is BLOCKING, otherwise VERDICT=FIX-FIRST.
+"""
+
+    def check_prompt(self, rv, r, other, targets, report, follow=False):
+        """Cross-examination of the other reviewer's findings, or a lone reviewer's check of its own."""
+        ids = ", ".join(targets)
+        rules = """Evidence is file:line with the code quoted, or a command and its output; a verdict without
+evidence does not count.
+"""
+        if other:
+            own = ", ".join(i for i, f in rv["findings"].items() if f["by"] == r["name"]) or "none"
+            return f"""Cross-examination{' of the follow-up review' if follow else ''} for epic #{self.a.parent}. The other reviewer ({other['name']})
+reviewed the same code on its own; its report is at {report}.
+Check each of its findings against the code yourself: CONFIRMED when the code shows the problem is real
+and correctly classified, DISPUTED when it does not. {rules}Answer each of these IDs exactly once: {ids}
+## ANSWERS: one line per ID: - {targets[0]} CONFIRMED <evidence>, or - {targets[0]} DISPUTED <evidence>
+## WITHDRAWN: any of your own findings ({own}) that its report shows you got wrong, one line each:
+- {r['letter']}1 WITHDRAWN <why>. Write "None." when there are none.
+{self.READ_ONLY}End with exactly one line: CHECK=DONE
+"""
+        return f"""Self-check for epic #{self.a.parent}: no second reviewer checks your findings, so re-check each one
+against the code now: CONFIRMED when the code bears it out, WITHDRAWN when it does not. {rules}Answer each of these IDs exactly once: {ids}
+## ANSWERS: one line per ID: - {targets[0]} CONFIRMED <evidence>, or - {targets[0]} WITHDRAWN <why>
+{self.READ_ONLY}End with exactly one line: CHECK=DONE
+"""
+
+    def ticket_writer_prompt(self, rv, drafts, asked):
+        lines = "\n".join(f"- {i} {f['class']} {f['text']}" + (f" (confirmed: {f['answer']})" if f.get("answer") else "")
+                          for i, f in rv["findings"].items() if self.blocking(f))
+        skill = self.skill_file(TICKET_WRITING_SKILLS[self.a.workflow])
+        again = (f"You stopped earlier to ask a human. Read their answer in the latest comments of gh issue view "
+                 f"{self.a.parent} --comments, then continue.\n") if asked else ""
+        return f"""You are the ticket writer for epic #{self.a.parent}. The epic review confirmed these blocking findings; each needs a fix:
+{lines}
+Follow {skill} to group them into fix tickets: findings that one change fixes belong in one ticket, and
+independent fixes go in separate tickets so they can run in parallel. This run is unattended: skip every
+step that asks the user to approve, quiz or iterate, and ignore the skill's instructions on where to save or
+publish tickets (no tasks/ files, no local issue files, no issue tracker, no gh issue create). Write each fix
+ticket as its own file {drafts}/NN-short-slug.md, numbered from 01, and nothing else; the runner files them.
+Each file has exactly these sections:
+# <title>
+## What to build
+## Acceptance criteria
+- [ ] <specific, testable condition>
+## Verification
+- [ ] <the focused test command, and any manual check>
+## Files likely touched
+- <path>
+## Scope
+XS, S or M
+## Blocked by
+None, or the numbers of the drafts that must land first (for example: 01)
+## Findings
+The finding IDs this ticket fixes (for example: D1, G2)
+Every finding ID above appears in exactly one ticket's Findings. Keep each ticket to at most 8 files.
+{self.domain()}{again}Do not edit any other file, commit, change branches, push, or post comments.
+Use only CommandCode for agent work; do not invoke codex or claude CLIs.
+End with exactly one line: STATUS=COMPLETE, or STATUS=NEEDS_HUMAN when a fix needs a human decision (say which).
+"""
+
+    def follow_up_prompt(self, rv, r):
+        targets = [i for i, f in rv["findings"].items() if self.blocking(f)]
+        used = [int(i[1:]) for i in rv["findings"] if i[0] == r["letter"]]
+        tickets = "\n".join(f"  #{n} {self.tickets[n]['title']}" for n in rv["fixTickets"])
+        return f"""Follow-up review for epic #{self.a.parent}. These fix tickets for the confirmed blocking findings have integrated:
+{tickets}
+Review only the fix diff: git diff {rv['start']}..{rv['fixHead']} and git log {rv['start']}..{rv['fixHead']}. The epic review so
+far is at {self.folder / 'review' / 'report.md'}.
+## FIXES: each of these confirmed findings exactly once: - {targets[0]} FIXED <evidence>, or - {targets[0]} NOT FIXED <evidence>.
+IDs: {', '.join(targets)}
+## FINDINGS: only problems the fix diff itself introduced, numbered on from {r['letter']}{max(used, default=0) + 1}, in the
+same shape as before: BLOCKING for a defect the fixes caused, DEFERRED for anything else you notice.
+Anything outside the fix diff is out of scope. Write "None." when there are none.
+{self.READ_ONLY}End with exactly one line: FOLLOW-UP=DONE
+"""
+
+    def repair_review_prompt(self, wt, tip, vdir):
+        return f"""You are the repair reviewer for epic #{self.a.parent}. The epic review said SHIP at {tip}; the verify stage
+then failed, and its repair committed a fix in this worktree ({wt}). Review only that repair: git diff
+{tip}..HEAD and git log {tip}..HEAD. The verify report is at {vdir / 'report.md'} and the repair agent's report
+at {vdir / 'repair' / 'final.txt'}. Follow {self.skill_file('code-review-and-quality')}: is the fix correct, and
+does it break anything the epic needs?
+{self.domain()}## FINDINGS: one line per finding: - R1 BLOCKING path/to/file.ts:42 — what is wrong — the evidence.
+Write "None." when there are none.
+{self.READ_ONLY}End with exactly one line: VERDICT=PASS when nothing is BLOCKING, otherwise VERDICT=FAIL.
 """

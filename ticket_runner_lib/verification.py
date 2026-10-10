@@ -53,6 +53,8 @@ class Verification:
             if not self.verify_repair(rec, wt, vdir):
                 return 1
             self.update(rec, phase="recheck")
+        if git(wt, "rev-parse", "HEAD") != tip and not self.a.no_epic_review and not self.repair_review(rec, wt, tip):
+            return 1
         return self.verify_merge(rec, wt, tip)
 
     def verify_fingerprint(self, head):
@@ -103,7 +105,8 @@ class Verification:
             self.worktrees.mkdir(parents=True, exist_ok=True)
             if attempt(self.root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").returncode:
                 git(self.root, "worktree", "add", "-q", "-b", branch, str(wt), tip)
-                self.update(rec, drop=("repaired", "phase", "check", "repair", "reason", "gatePassed"))
+                self.update(rec, drop=("repaired", "phase", "check", "repair", "reason", "gatePassed",
+                                       "repairReview"))
             else:
                 git(self.root, "worktree", "add", "-q", str(wt), branch)
         if created:
@@ -314,6 +317,43 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
                            f"{'; ' + problem if problem else ''}; see {vdir / 'repair'}. Fix it in "
                            f"{os.path.relpath(wt)}, then --epic-only")
             return False
+        return True
+
+    def repair_review(self, rec, wt, tip):
+        """One epic reviewer reads only the repair, so the epic review's SHIP extends to the repaired head."""
+        a, vdir, head = self.a, self.folder / "verify", git(wt, "rev-parse", "HEAD")
+        rr = rec.setdefault("repairReview", {})
+        if rr.get("status") == "pass" and rr.get("base") == tip and rr.get("head") == head:
+            return True
+        model = a.epic_review_models[-1]
+        session = rr.get("sessionId") if a.resume and rr.get("status") in RETRYABLE and rr.get("head") == head \
+            else None
+        self.update(rr, base=tip, head=head, status="in-progress", drop=() if session else ("sessionId",))
+        say(f"\n━━ Repair review of {tip[:8]}..{head[:8]} with {model} ━━", BOLD, BLUE)
+        before = untracked(wt)
+        text = self.run_agent(model, a.epic_review_effort, a.epic_review_max_turns,
+                              self.repair_review_prompt(wt, tip, vdir), vdir / "repair-review", rr, session,
+                              cwd=wt, tag="repair review", color=self.stage_color(4))
+        self.guard()
+        if self.verify_tree_problem(wt, head) or untracked(wt) - before:
+            self.update(rec, unexpectedUntracked=sorted(untracked(wt) - before))
+            self.epic_fail(rec, "needs-human", f"the repair review changed {os.path.relpath(wt)}, but it must be "
+                           "read-only; inspect the worktree, then --epic-only")
+            return False
+        if rr["status"] != "reported":
+            self.epic_fail(rec, rr["status"], f"the repair review ended {rr['status']}; --resume --epic-only "
+                           f"continues it (logs in {vdir / 'repair-review'})")
+            return False
+        result = verdict(text, r"VERDICT=(PASS|FAIL)")
+        if result != "PASS":
+            self.update(rr, status="fail")
+            self.epic_fail(rec, "needs-human", ("the repair review found blocking problems in the verify repair"
+                                                if result == "FAIL" else "the repair review gave no verdict") +
+                           f"; see {vdir / 'repair-review' / 'final.txt'}. Fix it in {os.path.relpath(wt)} "
+                           "(commit there), then --epic-only")
+            return False
+        self.update(rr, status="pass")
+        say(f"Repair review passed for {head[:8]}", GREEN, BOLD)
         return True
 
     def verify_merge(self, rec, wt, tip):

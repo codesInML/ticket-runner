@@ -1,4 +1,4 @@
-"""Parallel GitHub ticket implementation, then verify, epic review and ship stages, via CommandCode.
+"""Parallel GitHub ticket implementation, then epic review, verify and ship stages, via CommandCode.
 
 Every unblocked ticket runs in its own git worktree (.scratch/worktrees/<n>) on
 branch cc/<parent>/<n>, cut from the epic tip when it starts; up to --jobs run
@@ -9,26 +9,38 @@ session once; if that does not fix it the ticket needs a human. A failed ticket
 holds back only the tickets that depend on it. Once every ticket has merged, the
 epic stages run in order, each skipped while its result still holds for the
 epic head (a new epic commit invalidates the stages after it):
+  epic review  one or two reviewers (default deepseek and glm) each read the whole epic
+               diff on their own and number their findings (D1, G1…) BLOCKING or DEFERRED.
+               Two reviewers then cross-examine: each answers every one of the other's
+               findings CONFIRMED or DISPUTED with evidence; a lone reviewer re-checks its
+               own. Confirmed BLOCKING findings become fix tickets: the first reviewer drafts
+               them with the workflow's skill, the runner files them as sub-issues labelled
+               epic-review-fix, and they run like any ticket. One follow-up review of only
+               the fix diff marks each finding FIXED or NOT FIXED; anything still blocking
+               needs a human. On SHIP every sub-ticket closes (the epic stays open), and the
+               deferred and disputed findings are posted on the epic.
   verify       the project's verify commands in a worktree at the epic tip, then, when the
                config sets serve, the app started with serveEnv and a read-only verifier that
                marks each Verification item and checkpoint VERIFIED, FAILED or UNVERIFIABLE.
-               A failure gets one repair agent, the gate, and the whole stage again; a pass
-               fast-forwards the epic branch to any repair commits.
-  epic review  reads the whole epic diff once, with the verify report as evidence.
+               A failure gets one repair agent, the gate, and the whole stage again; a repair
+               review by the last epic reviewer reads only the repair, then a pass
+               fast-forwards the epic branch to the repair commits.
   ship         on a SHIP verdict: a launch plan, a push of the epic branch (never forced),
                and a pull request whose body the runner writes. --merge then waits for CI
                and merges when green.
 
 A workflow names the skills each prompt follows:
-  pocock  one implement skill (IMPLEMENT_SKILL) whose own code review runs in sub-agents.
+  pocock  one implement skill (IMPLEMENT_SKILL) whose own code review runs in sub-agents;
+          the epic review's ticket writer follows to-tickets.
   osmani  Addy Osmani's agent skills. The implementer does not review itself; a ticket
           review — a fresh read-only session on another model family — sorts findings
           into BLOCKING, DEFERRED and REJECTED. BLOCKING findings get one fix round in the
           implementer's session, then a re-review by the same model; DEFERRED findings
-          are consolidated by the epic review and posted once on the parent issue.
-In both workflows the verify repair follows debugging-and-error-recovery, the launch plan
-follows shipping-and-launch, and the verifier uses browser-testing-with-devtools when the
-project config turns the browser on.
+          are carried into the epic review. The ticket writer follows
+          planning-and-task-breakdown.
+In both workflows the epic review follows code-review-and-quality, the verify repair follows
+debugging-and-error-recovery, the launch plan follows shipping-and-launch, and the verifier
+uses browser-testing-with-devtools when the project config turns the browser on.
 """
 
 from pathlib import Path
@@ -48,7 +60,7 @@ from .github import discover, gh_json
 from .graph import classify, render_graph
 from .processes import attempt, command, dirty
 from .runner import Runner
-from .settings import BOLD, DIM, EFFORTS, CLAUDE_MODEL, LAUNCH_PLAN_MODELS, MODELS, OSMANI_SOURCE, RED, WORKFLOWS, YELLOW
+from .settings import BOLD, DIM, EFFORTS, EPIC_REVIEWERS, LAUNCH_PLAN_MODELS, MODELS, OSMANI_SOURCE, RED, WORKFLOWS, YELLOW
 
 
 def positive(value):
@@ -72,7 +84,8 @@ Examples:
   ticket-runner 207 --jobs 2 --model muse
   ticket-runner 207 --resume --max-turns 1000
   ticket-runner 207 --only 209
-  ticket-runner 207 --epic-only               (verify, epic review, ship)
+  ticket-runner 207 --epic-only               (epic review, verify, ship)
+  ticket-runner 207 --epic-review-model glm   (one reviewer, which re-checks its own findings)
   ticket-runner 207 --epic-only --merge
   ticket-runner-osmani 207 --dry-run       (same runner, --workflow osmani)
   ticket-runner-osmani 207 --ticket-review-model glm
@@ -102,10 +115,11 @@ and a ticket whose diff touches one is not integrated. AGENTS.md may carry a `##
 section naming the project's personal data, governed parameters, public contracts and
 performance-sensitive areas; the prompts point agents at it.
 
-Epic stages: --epic-only runs only them; --no-verify, --no-epic-review and
---no-ship skip one each. No epic review means no ship; --merge refuses unless verify ran
-and passed and the epic review said SHIP. --resume also continues an interrupted verifier,
-verify repair or launch plan session. A needs-human verify keeps .scratch/worktrees/verify
+Epic stages: --epic-only runs only them (and any fix tickets); --no-verify,
+--no-epic-review and --no-ship skip one each. No epic review means no ship; --merge refuses
+unless verify ran and passed and the epic review said SHIP for the head (through the repair
+review after a verify repair). --resume also continues an interrupted epic reviewer,
+verifier, verify repair, repair review or launch plan session. A needs-human verify keeps .scratch/worktrees/verify
 (branch cc/<parent>/verify): fix it there, commit, then --epic-only.
 
 Merged (done) and closed tickets are always skipped. --resume continues the saved
@@ -146,7 +160,9 @@ Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (defa
     p.add_argument("--verify-effort", default=os.getenv("VERIFY_EFFORT", "high"))
     p.add_argument("--verify-max-turns", type=positive, default=os.getenv("VERIFY_MAX_TURNS", "500"))
     p.add_argument("--no-verify", action="store_true", help="skip the verify stage")
-    p.add_argument("--epic-review-model", default=os.getenv("EPIC_REVIEW_MODEL", CLAUDE_MODEL))
+    p.add_argument("--epic-review-model", default=os.getenv("EPIC_REVIEW_MODEL", EPIC_REVIEWERS),
+                   help="one or two comma-separated, different epic reviewers (default deepseek,glm); "
+                   "two cross-examine each other's findings, one re-checks its own")
     p.add_argument("--epic-review-effort", default=os.getenv("EPIC_REVIEW_EFFORT", "high"))
     p.add_argument("--epic-review-max-turns", type=positive, default=os.getenv("EPIC_REVIEW_MAX_TURNS", "500"))
     p.add_argument("--launch-plan-model", choices=LAUNCH_PLAN_MODELS,
@@ -173,7 +189,9 @@ Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (defa
         p.error("--merge needs the verify stage, the epic review and the ship stage: drop --only, --no-verify, "
                 "--no-epic-review and --no-ship")
     a.model = MODELS.get(a.model, a.model)
-    a.epic_review_model = MODELS.get(a.epic_review_model, a.epic_review_model)
+    a.epic_review_models = [MODELS.get(m, m) for m in a.epic_review_model.replace(" ", "").split(",") if m]
+    if not 1 <= len(a.epic_review_models) <= 2 or len(set(a.epic_review_models)) < len(a.epic_review_models):
+        p.error("--epic-review-model needs one or two different models")
     a.verify_model = MODELS.get(a.verify_model, a.verify_model)
     if a.launch_plan_model not in LAUNCH_PLAN_MODELS:  # argparse leaves an environment default unchecked
         p.error(f"--launch-plan-model must be one of {', '.join(LAUNCH_PLAN_MODELS)}")
@@ -183,8 +201,9 @@ Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (defa
         p.error("--ticket-review-model needs at least one model")
     if a.effort is None:
         a.effort = "xhigh" if a.model == MODELS["muse"] else "max"
-    for model, effort in [(a.model, a.effort), (a.epic_review_model, a.epic_review_effort), (a.verify_model, a.verify_effort),
-                          (a.launch_plan_model, a.launch_plan_effort), *((m, a.ticket_review_effort) for m in a.ticket_review_models)]:
+    for model, effort in [(a.model, a.effort), (a.verify_model, a.verify_effort), (a.launch_plan_model, a.launch_plan_effort),
+                          *((m, a.epic_review_effort) for m in a.epic_review_models),
+                          *((m, a.ticket_review_effort) for m in a.ticket_review_models)]:
         if model in EFFORTS and effort != "none" and effort not in EFFORTS[model]:
             p.error(f"{model} effort must be one of {sorted(EFFORTS[model])}, or none")
     return a
@@ -245,7 +264,8 @@ def run_checkout(a, root, folder):
                                f"{'is' if len(busy) == 1 else 'are'} part-way through; finish them with "
                                f"--workflow {saved}, or reset them, before switching to {a.workflow}")
     osmani = a.workflow == "osmani"
-    review = "off" if a.no_epic_review else f"{a.epic_review_model}/{a.epic_review_effort}, {a.epic_review_max_turns} turns"
+    review = "off" if a.no_epic_review else (f"{' + '.join(a.epic_review_models)} @ {a.epic_review_effort}, "
+                                             f"{a.epic_review_max_turns} turns")
     ticket_review = (f"; ticket review: {'/'.join(a.ticket_review_models)} @ {a.ticket_review_effort}, "
                      f"{a.ticket_review_max_turns} turns") if osmani else ""
     say(f"Workflow: {a.workflow}. Implement: {a.model}/{a.effort}, {a.max_turns} turns, {a.jobs} at once"
@@ -253,6 +273,10 @@ def run_checkout(a, root, folder):
     if osmani and a.model in a.ticket_review_models:
         say(f"Warning: ticket review shares {a.model} with the implementer, and with it the same blind spots",
             YELLOW, err=True)
+    if not a.no_epic_review and a.model in a.epic_review_models:
+        say(f"Warning: the epic review shares {a.model} with the implementer"
+            + (", so the other reviewer's cross-examination matters most" if len(a.epic_review_models) > 1 else
+               ", and with it the same blind spots"), YELLOW, err=True)
     skills_dir = Path(os.getenv("AGENT_SKILLS_DIR", str(Path.home() / ".agents/skills")))
     missing = skill_problems(skills_dir, stage_skills(a, cfg))
     for item in missing:
@@ -303,7 +327,8 @@ def run_checkout(a, root, folder):
     if dirty(root):
         raise RuntimeError("Dirty main worktree; commit or stash first. No files discarded.")
     skill = Path(os.getenv("IMPLEMENT_SKILL", str(Path.home() / ".agents/skills/implement/SKILL.md")))
-    if not osmani and not a.epic_only and not skill.is_file():
+    # Fix tickets from the epic review run through the implement skill too, even under --epic-only.
+    if not osmani and not (a.epic_only and a.no_epic_review) and not skill.is_file():
         raise RuntimeError(f"Implementation skill not found: {skill}")
     return Runner(a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg).execute()
 

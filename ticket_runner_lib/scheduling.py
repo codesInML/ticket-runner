@@ -99,12 +99,12 @@ class Scheduling:
             for n, unmet in self.deferred.items():
                 say(f"  #{n} deferred: needs {' '.join(map(ref, unmet))} closed outside the epic", DIM)
         if remaining and not self.a.only:
-            say(f"Epic incomplete: {remaining}. Epic review deferred.", YELLOW)
+            say(f"Epic incomplete: {remaining}. The epic stages wait for it.", YELLOW)
             return 1
         if self.a.only and (failed or pending or self.parked or self.deferred):
             return 1
         if self.a.only:
-            say("Ticket run finished; verify, epic review and ship skipped (--only).", GREEN)
+            say("Ticket run finished; epic review, verify and ship skipped (--only).", GREEN)
             return 0
         return None
 

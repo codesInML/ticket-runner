@@ -14,7 +14,9 @@ package.
 - `worktrees.py`: provisioning, integration, gates, and conflict repair.
 - `agents.py`: CommandCode sessions and logged shell processes.
 - `prompts.py`: stage prompts and skill guidance.
-- `review.py`: ticket and epic reviews and deferred findings.
+- `review.py`: ticket reviews and their fix round.
+- `epic_review.py`: the epic review: reviewers, cross-examination, fix tickets, the follow-up
+  review, and closing sub-tickets.
 - `verification.py`: command and runtime checks, repairs, and reports.
 - `shipping.py`: launch plans, pushes, pull requests, and CI-gated merges.
 - `config.py`, `github.py`, and `graph.py`: configuration validation, issue
@@ -65,3 +67,15 @@ terminated on completion, timeout, or interruption, including background descend
 State writes remain immediate and atomic for recovery. A local benchmark of 200
 writes measured about 1.0 ms/write for 10 records and 1.4 ms/write for 100 records;
 there was no evidence that sacrificing immediate checkpoints would help.
+
+## Epic review guarantees
+
+The epic review runs before verify. Each reviewer's findings carry stable IDs, and every
+cross-examination or self-check must answer each ID it is given exactly once; the runner,
+not a model, decides which findings are confirmed, disputed or withdrawn. Only confirmed
+blocking findings become fix tickets, and only the runner files them, with a marker in each
+body so a retry finds an issue it already filed instead of filing it twice. One follow-up
+review reads only the fix diff; anything still blocking needs a human. A verify repair after
+SHIP gets a repair review, and `--merge` accepts a head only through that chain. See
+`CONTEXT.md` for the vocabulary and `docs/adr/0001-*` for why.
+

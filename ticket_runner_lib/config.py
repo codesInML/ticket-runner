@@ -10,7 +10,8 @@ from .display import paint
 from .github import references
 from .settings import (
     BOLD, BROWSER_ADD, BROWSER_SERVER, BROWSER_SKILL, CONFIG, DEFAULTS, EPIC_REVIEW_SKILLS,
-    IMPLEMENT_SKILLS, INTEGRATION_SKILLS, MERGE_METHODS, SHIP_SKILLS, TICKET_REVIEW_SKILLS, VERIFY_SKILLS,
+    IMPLEMENT_SKILLS, INTEGRATION_SKILLS, MERGE_METHODS, SHIP_SKILLS, TICKET_REVIEW_SKILLS, TICKET_WRITING_SKILLS,
+    VERIFY_SKILLS,
 )
 from .text import section
 
@@ -106,12 +107,14 @@ def plan_problems(tickets, parent_body):
 def stage_skills(a, cfg):
     """Exactly the skills the stages this run enables will name, in either workflow."""
     names, osmani, post = [], a.workflow == "osmani", not a.only
-    if osmani and not a.epic_only:
+    review = post and not a.no_epic_review
+    # The epic review's fix tickets run through the ticket stages, even under --epic-only.
+    if osmani and (not a.epic_only or review):
         names += IMPLEMENT_SKILLS + TICKET_REVIEW_SKILLS + INTEGRATION_SKILLS
+    if review:
+        names += EPIC_REVIEW_SKILLS + (TICKET_WRITING_SKILLS[a.workflow],)
     if post and not a.no_verify and (cfg["verify"] or cfg["serve"]):
         names += VERIFY_SKILLS + ((BROWSER_SKILL,) if cfg["browser"] else ())
-    if post and not a.no_epic_review and osmani:
-        names += EPIC_REVIEW_SKILLS
     if post and not a.no_epic_review and not a.no_ship:
         names += SHIP_SKILLS
     return list(dict.fromkeys(names))
@@ -129,27 +132,31 @@ def plan_stages(a, cfg, data, open_tickets, head):
         todo = [a.only] if a.only else open_tickets
         lines.append(f"  tickets      {len(todo)} to run" + (f" (--only #{a.only})" if a.only else ""))
     if a.only:
-        lines.append("  verify, epic review, ship: skipped (--only)")
+        lines.append("  epic review, verify, ship: skipped (--only)")
         return "\n".join(lines)
+    if a.no_epic_review:
+        lines.append("  epic review  skipped (--no-epic-review)")
+    else:
+        names = " + ".join(a.epic_review_models)
+        how = "cross-examined" if len(a.epic_review_models) > 1 else "self-checked"
+        lines.append("  epic review  " + (f"cached SHIP at {head[:8]}" if held("_review", ("ship",)) else
+                                          f"{names}, {how}; confirmed blocking findings become fix tickets, "
+                                          "then one follow-up review"))
     runtime = (f"runtime checks: {cfg['serve']}" + (" + browser" if cfg["browser"] else "")) if cfg["serve"] \
         else "runtime checks off (no serve)"
     lines.append("  verify       " + ("skipped (--no-verify)" if a.no_verify else
                                       f"cached pass at {head[:8]}; inputs rechecked before skipping" if held("_verify", ("pass",)) else
                                       f"{len(cfg['verify'])} command(s); {runtime}"))
     if a.no_epic_review:
-        lines.append("  epic review  skipped (--no-epic-review)")
         lines.append("  ship         skipped (no epic review)")
-        return "\n".join(lines)
-    lines.append("  epic review  " + (f"cached {data['_review']['status']} at {head[:8]}; evidence rechecked before skipping"
-                                      if held("_review", ("ship", "fix-first")) else f"{a.epic_review_model}"))
-    if a.no_ship:
+    elif a.no_ship:
         lines.append("  ship         skipped (--no-ship)")
     else:
         merge = f"; then --merge ({cfg['mergeMethod']}) once CI is green" if a.merge else ""
         into = cfg["prBase"] or "origin's default branch"
         lines.append("  ship         " + (f"pull request already open at {head[:8]}" if held("_ship", ("pr-open", "merged"))
-                                          else f"launch plan, push, pull request into {into}") + merge +
-                     " (only on a SHIP verdict)")
+                                          else f"launch plan ({a.launch_plan_model}), push, pull request into {into}")
+                     + merge + " (only on a SHIP verdict)")
     return "\n".join(lines)
 
 

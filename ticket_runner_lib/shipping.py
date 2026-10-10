@@ -1,17 +1,22 @@
 """Launch plans, epic pushes, pull requests, and CI-gated merges."""
 
 import os
-import re
 import subprocess
 
 from .display import say
 from .github import gh_json
 from .processes import attempt, command, dirty, git
 from .settings import BLUE, BOLD, CONFIG, DIM, GREEN, RETRYABLE
-from .text import section
+from .text import empty, section
 
 
 class Shipping:
+    def evidence(self, head):
+        """The input fingerprint of passing verification at this head, otherwise None."""
+        verify = self.data.get("_verify", {})
+        return verify.get("fingerprint") if not self.a.no_verify and verify.get("status") == "pass" and \
+            verify.get("head") == head else None
+
     def ship(self):
         """Launch plan, push and pull request for a SHIP verdict; with --merge, merge once CI is green."""
         a, rec = self.a, self.data.setdefault("_ship", {})
@@ -66,7 +71,7 @@ class Shipping:
 The runner pastes your report into the epic's pull request as written. Follow
 {self.skill_file('shipping-and-launch')} and the definition of done in {dod}.
 Read AGENTS.md, the parent issue with gh issue view {a.parent}, git diff {base}..{head} and git log
-{base}..{head}, the epic review at {self.folder / 'review' / 'final.txt'}, and {evidence}.
+{base}..{head}, the epic review's report at {self.folder / 'review' / 'report.md'}, and {evidence}.
 {self.domain()}Write these markdown sections, in order, each backed by evidence (file:line, a command and its output,
 a report line), not boilerplate:
 ## Pre-launch checklist: the shipping-and-launch checklist and the definition of done, each item checked
@@ -159,10 +164,11 @@ Use only CommandCode for agent work; do not invoke codex or claude CLIs.
                  f"{commits} commits from `{base_commit[:8]}` to `{head[:8]}`: {stat.strip()}.", "",
                  "## Tickets", tickets, "", "## Verify", self.verify_summary(verified), "",
                  "## Launch plan", (sdir / "launch-plan.md").read_text().strip()]
-        review = self.folder / "review" / "final.txt"
-        deferred = section(review.read_text(), "DEFERRED") if review.exists() else None
-        if deferred and not re.fullmatch(r"none\.?", deferred, re.I):
-            parts += ["", "## Deferred findings", deferred]
+        review = self.folder / "review" / "report.md"
+        for title in ("Deferred findings", "Disputed findings"):
+            found = section(review.read_text(), title) if review.exists() else None
+            if not empty(found):
+                parts += ["", f"## {title}", found]
         body = sdir / "pr-body.md"
         body.write_text("\n".join(parts) + "\n")
         title = f"{parent.get('title') or 'Epic'} (#{a.parent})"
@@ -186,10 +192,10 @@ Use only CommandCode for agent work; do not invoke codex or claude CLIs.
 
     def merge_pr(self, rec, head, verified):
         """--merge: only a SHIP verdict on a verified head, and only once CI is green; never deletes branches."""
-        review, verify, n = self.data.get("_review", {}), self.data.get("_verify", {}), rec["pr"]
+        verify, n = self.data.get("_verify", {}), rec["pr"]
         problems = []
-        if review.get("status") != "ship" or review.get("head") != head:
-            problems.append(f"the epic review did not say SHIP for {head[:8]}")
+        if not self.review_covers(head):
+            problems.append(f"the epic review (with any repair review) did not say SHIP for {head[:8]}")
         if not verified:
             problems.append("the verify stage did not pass at this head")
         elif verify.get("ran") is False:

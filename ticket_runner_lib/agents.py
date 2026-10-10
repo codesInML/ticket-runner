@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import threading
 import time
 
 from .display import narrate, say
@@ -86,6 +87,35 @@ class AgentProcesses:
             status = "reported"
         self.update(record, exitCode=rc, head=head, status=status)
         return text
+
+    def parallel(self, jobs):
+        """Run agent sessions at once; their results in order. A failure in any is raised after all finish."""
+        if len(jobs) == 1:
+            return [jobs[0]()]
+        results, errors = [None] * len(jobs), [None] * len(jobs)
+
+        def run(i, job):
+            try:
+                results[i] = job()
+            except BaseException as exc:  # handed to the main thread below
+                errors[i] = exc
+
+        threads = [threading.Thread(target=run, args=(i, job), daemon=True) for i, job in enumerate(jobs)]
+        for thread in threads:
+            thread.start()
+        try:
+            for thread in threads:
+                while thread.is_alive():
+                    thread.join(0.5)  # a bounded join keeps Ctrl-C deliverable
+        except BaseException:
+            self.stop()
+            for thread in threads:
+                thread.join(30)
+            raise
+        for exc in errors:
+            if exc is not None:
+                raise exc
+        return results
 
     def log(self, tdir, kind):
         return tdir / f"{kind}-{len(list(tdir.glob(f'{kind}-*.log'))) + 1}.log"
