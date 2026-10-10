@@ -121,7 +121,7 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
         session = review.get("sessionId") if a.resume and review.get("status") in RETRYABLE and review.get("head") == head else None
         self.update(review, status="in-progress", head=head, workflow=a.workflow, verified=self.evidence(head),
                     drop=() if session else ("sessionId",))
-        say(f"\n━━ Epic review of #{a.parent} with {a.final_model} ━━", BOLD, BLUE)
+        say(f"\n━━ Epic review of #{a.parent} with {a.epic_review_model} ━━", BOLD, BLUE)
         checks = self.epic_brief() if self.osmani else """Check integration between slices, every parent requirement (MET/UNMET with evidence),
 and real correctness/security defects. Cite file and line for each actionable finding.
 Read-only review: do not edit files, commit, change branches, push, or post comments.
@@ -130,7 +130,7 @@ Use only CommandCode for agent work. Report INTEGRATION, EPIC SPEC, DEFECTS, and
         report = self.folder / "verify" / "report.md"
         evidence = (f"The verify stage's report is evidence for your review: {report}\n" if not a.no_verify
                     and report.exists() else "The verify stage was skipped for this run (--no-verify).\n")
-        text = self.run_agent(a.final_model, a.final_effort, a.final_max_turns, f"""You are the final reviewer for epic #{a.parent}.
+        text = self.run_agent(a.epic_review_model, a.epic_review_effort, a.epic_review_max_turns, f"""You are the epic reviewer for epic #{a.parent}.
 Read AGENTS.md, the parent spec with gh issue view {a.parent}, and each ticket in {self.order}.
 Review git diff {base}..{head} and git log {base}..{head} as a whole.
 {evidence}{checks}End with exactly one line: VERDICT=SHIP or VERDICT=FIX-FIRST.

@@ -106,13 +106,13 @@ def plan_problems(tickets, parent_body):
 def stage_skills(a, cfg):
     """Exactly the skills the stages this run enables will name, in either workflow."""
     names, osmani, post = [], a.workflow == "osmani", not a.only
-    if osmani and not a.final_only:
+    if osmani and not a.epic_only:
         names += IMPLEMENT_SKILLS + TICKET_REVIEW_SKILLS + INTEGRATION_SKILLS
     if post and not a.no_verify and (cfg["verify"] or cfg["serve"]):
         names += VERIFY_SKILLS + ((BROWSER_SKILL,) if cfg["browser"] else ())
-    if post and not a.no_final_review and osmani:
+    if post and not a.no_epic_review and osmani:
         names += EPIC_REVIEW_SKILLS
-    if post and not a.no_final_review and not a.no_ship:
+    if post and not a.no_epic_review and not a.no_ship:
         names += SHIP_SKILLS
     return list(dict.fromkeys(names))
 
@@ -123,8 +123,8 @@ def plan_stages(a, cfg, data, open_tickets, head):
         rec = data.get(key, {})
         return rec.get("head") == head and rec.get("status") in ok
     lines = [paint("Stages:", BOLD)]
-    if a.final_only:
-        lines.append("  tickets      skipped (--final-only)")
+    if a.epic_only:
+        lines.append("  tickets      skipped (--epic-only)")
     else:
         todo = [a.only] if a.only else open_tickets
         lines.append(f"  tickets      {len(todo)} to run" + (f" (--only #{a.only})" if a.only else ""))
@@ -136,12 +136,12 @@ def plan_stages(a, cfg, data, open_tickets, head):
     lines.append("  verify       " + ("skipped (--no-verify)" if a.no_verify else
                                       f"cached pass at {head[:8]}; inputs rechecked before skipping" if held("_verify", ("pass",)) else
                                       f"{len(cfg['verify'])} command(s); {runtime}"))
-    if a.no_final_review:
-        lines.append("  epic review  skipped (--no-final-review)")
+    if a.no_epic_review:
+        lines.append("  epic review  skipped (--no-epic-review)")
         lines.append("  ship         skipped (no epic review)")
         return "\n".join(lines)
     lines.append("  epic review  " + (f"cached {data['_review']['status']} at {head[:8]}; evidence rechecked before skipping"
-                                      if held("_review", ("ship", "fix-first")) else f"{a.final_model}"))
+                                      if held("_review", ("ship", "fix-first")) else f"{a.epic_review_model}"))
     if a.no_ship:
         lines.append("  ship         skipped (--no-ship)")
     else:

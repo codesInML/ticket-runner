@@ -61,8 +61,8 @@ class Shipping:
                     "no verify report: the verify stage was skipped, so say \"verify skipped\" in the checklist "
                     "and count every runtime check as unverified")
         dod = self.skills_dir.parent / "references" / "definition-of-done.md"
-        say(f"Launch plan with {a.final_model}", BOLD, BLUE)
-        text = self.run_agent(a.final_model, a.final_effort, a.final_max_turns, f"""You write the launch plan for epic #{a.parent}, which passed its epic review with VERDICT=SHIP.
+        say(f"Launch plan with {a.launch_plan_model}", BOLD, BLUE)
+        text = self.run_agent(a.launch_plan_model, a.launch_plan_effort, a.launch_plan_max_turns, f"""You write the launch plan for epic #{a.parent}, which passed its epic review with VERDICT=SHIP.
 The runner pastes your report into the epic's pull request as written. Follow
 {self.skill_file('shipping-and-launch')} and the definition of done in {dod}.
 Read AGENTS.md, the parent issue with gh issue view {a.parent}, git diff {base}..{head} and git log
@@ -84,10 +84,10 @@ Use only CommandCode for agent work; do not invoke codex or claude CLIs.
         self.guard()
         if dirty(self.root) or git(self.root, "rev-parse", "HEAD") != head:
             self.epic_fail(rec, "needs-human", "the launch plan agent changed the main worktree, but it must be "
-                           "read-only; inspect it, then --final-only")
+                           "read-only; inspect it, then --epic-only")
             return False
         if plan["status"] != "reported":
-            self.epic_fail(rec, plan["status"], f"the launch plan ended {plan['status']}; --resume --final-only "
+            self.epic_fail(rec, plan["status"], f"the launch plan ended {plan['status']}; --resume --epic-only "
                            f"continues it (logs in {sdir / 'plan'})")
             return False
         if section(text, "Rollback plan") is None:
@@ -113,7 +113,7 @@ Use only CommandCode for agent work; do not invoke codex or claude CLIs.
                 return False
             if attempt(self.root, "merge-base", "--is-ancestor", theirs, branch).returncode:
                 self.epic_fail(rec, "needs-human", f"origin/{branch} has commits that {branch} lacks; integrate "
-                               "them by hand (the runner never force-pushes), then --final-only")
+                               "them by hand (the runner never force-pushes), then --epic-only")
                 return False
         say(f"Pushing {branch} to origin", BOLD)
         pushed = attempt(self.root, "push", "-u", "origin", branch)
@@ -201,7 +201,7 @@ Use only CommandCode for agent work; do not invoke codex or claude CLIs.
         say(f"Waiting for CI on pull request #{n}", BOLD)
         if subprocess.run(["gh", "pr", "checks", str(n), "--watch"], cwd=self.root).returncode:
             return self.epic_fail(rec, "needs-human", f"CI is red (or reported no checks) on pull request #{n}; "
-                                  "fix it, then --final-only --merge")
+                                  "fix it, then --epic-only --merge")
         merged = subprocess.run(["gh", "pr", "merge", str(n), f"--{self.cfg['mergeMethod']}",
                                  "--match-head-commit", head], capture_output=True, text=True)
         if merged.returncode:

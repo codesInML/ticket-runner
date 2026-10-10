@@ -11,15 +11,19 @@ MODELS = {
     "muse": "meta/muse-spark-1.3-contributor",
     "luna": "gpt-6-luna",
     "glm": "z-ai/glm-5.3-flash",
+    "claude": "claude-sonnet-5-5",
 }
-EPIC_REVIEW_MODEL = "claude-sonnet-5-5"
+MODELS["deepseek"] = MODELS["flash"]
+CLAUDE_MODEL = MODELS["claude"]
+# The launch plan never runs on Claude: it is the cheapest stage to hand a cheaper model.
+LAUNCH_PLAN_MODELS = ("deepseek", "glm")
 EFFORTS = {
     MODELS["flash"]: {"off", "low", "high", "max"},
     MODELS["flash-fast"]: {"off", "low", "high", "max"},
     MODELS["muse"]: {"low", "medium", "high", "xhigh"},
     MODELS["luna"]: {"low", "medium", "high", "xhigh", "max"},
     MODELS["glm"]: {"low", "high", "max"},
-    EPIC_REVIEW_MODEL: {"low", "medium", "high", "xhigh", "max"},
+    CLAUDE_MODEL: {"low", "medium", "high", "xhigh", "max"},
 }
 WORKFLOWS = ("pocock", "osmani")
 # Osmani skills the runner names in its prompts. Each links ../../references/*.md, which the

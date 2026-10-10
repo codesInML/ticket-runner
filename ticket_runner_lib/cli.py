@@ -7,7 +7,7 @@ run the gate before every integration, fast-forward the epic branch, then remove
 worktree and branch. A rebase conflict or gate failure resumes the ticket's own
 session once; if that does not fix it the ticket needs a human. A failed ticket
 holds back only the tickets that depend on it. Once every ticket has merged, the
-post-ticket stages run in order, each skipped while its result still holds for the
+epic stages run in order, each skipped while its result still holds for the
 epic head (a new epic commit invalidates the stages after it):
   verify       the project's verify commands in a worktree at the epic tip, then, when the
                config sets serve, the app started with serveEnv and a read-only verifier that
@@ -48,7 +48,7 @@ from .github import discover, gh_json
 from .graph import classify, render_graph
 from .processes import attempt, command, dirty
 from .runner import Runner
-from .settings import BOLD, DIM, EFFORTS, EPIC_REVIEW_MODEL, MODELS, OSMANI_SOURCE, RED, WORKFLOWS, YELLOW
+from .settings import BOLD, DIM, EFFORTS, CLAUDE_MODEL, LAUNCH_PLAN_MODELS, MODELS, OSMANI_SOURCE, RED, WORKFLOWS, YELLOW
 
 
 def positive(value):
@@ -59,9 +59,10 @@ def positive(value):
 
 def parse_args():
     p = argparse.ArgumentParser(prog="ticket-runner", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Model aliases: flash (default), flash-fast, muse, luna, glm.
-Full CommandCode model IDs also work. Sonnet 5.5 runs the epic review and the launch
-plan by default; luna runs the verifier; verify repairs use the implementation model.
+        epilog="""Model aliases: flash or deepseek (default), flash-fast, muse, luna, glm, claude.
+Full CommandCode model IDs also work. Sonnet 5.5 runs the epic review by default; the
+launch plan runs on deepseek (or glm, never Claude); luna runs the verifier; verify
+repairs use the implementation model.
 Effort defaults: max for implementation (xhigh for Muse contributor), high for reviews.
 Ticket review (osmani only) alternates by ticket number over --ticket-review-model:
 even tickets get the first model, odd tickets the second; a re-review keeps its model.
@@ -71,8 +72,8 @@ Examples:
   ticket-runner 207 --jobs 2 --model muse
   ticket-runner 207 --resume --max-turns 1000
   ticket-runner 207 --only 209
-  ticket-runner 207 --final-only               (verify, epic review, ship)
-  ticket-runner 207 --final-only --merge
+  ticket-runner 207 --epic-only               (verify, epic review, ship)
+  ticket-runner 207 --epic-only --merge
   ticket-runner-osmani 207 --dry-run       (same runner, --workflow osmani)
   ticket-runner-osmani 207 --ticket-review-model glm
 
@@ -101,11 +102,11 @@ and a ticket whose diff touches one is not integrated. AGENTS.md may carry a `##
 section naming the project's personal data, governed parameters, public contracts and
 performance-sensitive areas; the prompts point agents at it.
 
-Post-ticket stages: --final-only runs only them; --no-verify, --no-final-review and
+Epic stages: --epic-only runs only them; --no-verify, --no-epic-review and
 --no-ship skip one each. No epic review means no ship; --merge refuses unless verify ran
 and passed and the epic review said SHIP. --resume also continues an interrupted verifier,
 verify repair or launch plan session. A needs-human verify keeps .scratch/worktrees/verify
-(branch cc/<parent>/verify): fix it there, commit, then --final-only.
+(branch cc/<parent>/verify): fix it there, commit, then --epic-only.
 
 Merged (done) and closed tickets are always skipped. --resume continues the saved
 CommandCode session of an unfinished ticket in its kept worktree, and retries
@@ -122,7 +123,8 @@ Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (defa
      ~/.agents/skills), IMPL_MODEL, IMPL_EFFORT, IMPL_MAX_TURNS, IMPL_JOBS,
      VERIFY_MODEL, VERIFY_EFFORT, VERIFY_MAX_TURNS (the verifier),
      TICKET_REVIEW_MODEL, TICKET_REVIEW_EFFORT, TICKET_REVIEW_MAX_TURNS,
-     FINAL_MODEL, FINAL_EFFORT, FINAL_MAX_TURNS (the epic review),
+     EPIC_REVIEW_MODEL, EPIC_REVIEW_EFFORT, EPIC_REVIEW_MAX_TURNS,
+     LAUNCH_PLAN_MODEL, LAUNCH_PLAN_EFFORT, LAUNCH_PLAN_MAX_TURNS,
      GATE_CMDS and INSTALL_CMD (override the config's gate and install).
 """)
     p.add_argument("parent", type=positive)
@@ -144,39 +146,45 @@ Env: COMMANDCODE_BIN, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (defa
     p.add_argument("--verify-effort", default=os.getenv("VERIFY_EFFORT", "high"))
     p.add_argument("--verify-max-turns", type=positive, default=os.getenv("VERIFY_MAX_TURNS", "500"))
     p.add_argument("--no-verify", action="store_true", help="skip the verify stage")
-    p.add_argument("--final-model", default=os.getenv("FINAL_MODEL", EPIC_REVIEW_MODEL))
-    p.add_argument("--final-effort", default=os.getenv("FINAL_EFFORT", "high"))
-    p.add_argument("--final-max-turns", type=positive, default=os.getenv("FINAL_MAX_TURNS", "500"))
+    p.add_argument("--epic-review-model", default=os.getenv("EPIC_REVIEW_MODEL", CLAUDE_MODEL))
+    p.add_argument("--epic-review-effort", default=os.getenv("EPIC_REVIEW_EFFORT", "high"))
+    p.add_argument("--epic-review-max-turns", type=positive, default=os.getenv("EPIC_REVIEW_MAX_TURNS", "500"))
+    p.add_argument("--launch-plan-model", choices=LAUNCH_PLAN_MODELS,
+                   default=os.getenv("LAUNCH_PLAN_MODEL", "deepseek"),
+                   help="model that writes the ship stage's launch plan (default deepseek)")
+    p.add_argument("--launch-plan-effort", default=os.getenv("LAUNCH_PLAN_EFFORT", "high"))
+    p.add_argument("--launch-plan-max-turns", type=positive, default=os.getenv("LAUNCH_PLAN_MAX_TURNS", "500"))
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--only", type=positive)
-    p.add_argument("--final-only", action="store_true")
+    p.add_argument("--epic-only", action="store_true", help="skip the tickets and run only the epic stages")
     p.add_argument("--epic-base", help="commit the epic started from (default: saved state, else HEAD; "
-                   "--final-only without saved state defaults to the merge-base with origin's default branch)")
-    group = p.add_mutually_exclusive_group()
-    group.add_argument("--no-final-review", action="store_true", help="skip the epic review (and so the ship stage)")
-    group.add_argument("--final-review", action="store_true", help="run the epic review; already the default")
+                   "--epic-only without saved state defaults to the merge-base with origin's default branch)")
+    p.add_argument("--no-epic-review", action="store_true", help="skip the epic review (and so the ship stage)")
     p.add_argument("--no-ship", action="store_true", help="skip the ship stage (launch plan, push, pull request)")
     p.add_argument("--merge", action="store_true", help="after the ship stage, wait for CI on the pull request "
                    "and merge it when green (needs the verify stage and a SHIP verdict)")
     a = p.parse_args()
-    if a.final_only and a.only:
-        p.error("--final-only cannot be combined with --only")
-    if a.final_only and a.no_verify and a.no_final_review:
-        p.error("--final-only with --no-verify and --no-final-review leaves nothing to run")
-    if a.merge and (a.only or a.no_verify or a.no_final_review or a.no_ship):
+    if a.epic_only and a.only:
+        p.error("--epic-only cannot be combined with --only")
+    if a.epic_only and a.no_verify and a.no_epic_review:
+        p.error("--epic-only with --no-verify and --no-epic-review leaves nothing to run")
+    if a.merge and (a.only or a.no_verify or a.no_epic_review or a.no_ship):
         p.error("--merge needs the verify stage, the epic review and the ship stage: drop --only, --no-verify, "
-                "--no-final-review and --no-ship")
+                "--no-epic-review and --no-ship")
     a.model = MODELS.get(a.model, a.model)
-    a.final_model = MODELS.get(a.final_model, a.final_model)
+    a.epic_review_model = MODELS.get(a.epic_review_model, a.epic_review_model)
     a.verify_model = MODELS.get(a.verify_model, a.verify_model)
+    if a.launch_plan_model not in LAUNCH_PLAN_MODELS:  # argparse leaves an environment default unchecked
+        p.error(f"--launch-plan-model must be one of {', '.join(LAUNCH_PLAN_MODELS)}")
+    a.launch_plan_model = MODELS[a.launch_plan_model]
     a.ticket_review_models = [MODELS.get(m, m) for m in a.ticket_review_model.replace(" ", "").split(",") if m]
     if not a.ticket_review_models:
         p.error("--ticket-review-model needs at least one model")
     if a.effort is None:
         a.effort = "xhigh" if a.model == MODELS["muse"] else "max"
-    for model, effort in [(a.model, a.effort), (a.final_model, a.final_effort), (a.verify_model, a.verify_effort),
-                          *((m, a.ticket_review_effort) for m in a.ticket_review_models)]:
+    for model, effort in [(a.model, a.effort), (a.epic_review_model, a.epic_review_effort), (a.verify_model, a.verify_effort),
+                          (a.launch_plan_model, a.launch_plan_effort), *((m, a.ticket_review_effort) for m in a.ticket_review_models)]:
         if model in EFFORTS and effort != "none" and effort not in EFFORTS[model]:
             p.error(f"{model} effort must be one of {sorted(EFFORTS[model])}, or none")
     return a
@@ -186,9 +194,9 @@ def epic_base(a):
     if a.epic_base:
         return command("git", "rev-parse", "--verify", f"{a.epic_base}^{{commit}}")
     head = command("git", "rev-parse", "HEAD")
-    if not a.final_only:
+    if not a.epic_only:
         return head
-    # A fresh --final-only has no recorded start; review everything the branch adds to the default branch.
+    # A fresh --epic-only has no recorded start; review everything the branch adds to the default branch.
     default = subprocess.run(["git", "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
                              capture_output=True, text=True).stdout.strip() or "main"
     base = command("git", "merge-base", "HEAD", default)
@@ -237,7 +245,7 @@ def run_checkout(a, root, folder):
                                f"{'is' if len(busy) == 1 else 'are'} part-way through; finish them with "
                                f"--workflow {saved}, or reset them, before switching to {a.workflow}")
     osmani = a.workflow == "osmani"
-    review = "off" if a.no_final_review else f"{a.final_model}/{a.final_effort}, {a.final_max_turns} turns"
+    review = "off" if a.no_epic_review else f"{a.epic_review_model}/{a.epic_review_effort}, {a.epic_review_max_turns} turns"
     ticket_review = (f"; ticket review: {'/'.join(a.ticket_review_models)} @ {a.ticket_review_effort}, "
                      f"{a.ticket_review_max_turns} turns") if osmani else ""
     say(f"Workflow: {a.workflow}. Implement: {a.model}/{a.effort}, {a.max_turns} turns, {a.jobs} at once"
@@ -255,7 +263,7 @@ def run_checkout(a, root, folder):
                 f"cp -R /tmp/agent-skills/references {skills_dir.parent}/"] if missing else []
     refusals += stage_refusals(a, cfg, root)
     if osmani:
-        if not a.final_only:
+        if not a.epic_only:
             parent_body = gh_json("issue", "view", str(a.parent), "--json", "body")["body"] or ""
             problems, warnings = plan_problems(tickets, parent_body)
             for item in warnings:
@@ -295,7 +303,7 @@ def run_checkout(a, root, folder):
     if dirty(root):
         raise RuntimeError("Dirty main worktree; commit or stash first. No files discarded.")
     skill = Path(os.getenv("IMPLEMENT_SKILL", str(Path.home() / ".agents/skills/implement/SKILL.md")))
-    if not osmani and not a.final_only and not skill.is_file():
+    if not osmani and not a.epic_only and not skill.is_file():
         raise RuntimeError(f"Implementation skill not found: {skill}")
     return Runner(a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg).execute()
 

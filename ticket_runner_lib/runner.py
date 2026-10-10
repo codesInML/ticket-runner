@@ -104,7 +104,7 @@ class Runner(
         try:
             self.persist()
             attempt(self.root, "worktree", "prune")
-            self.selected = [] if self.a.final_only else ([self.a.only] if self.a.only else self.order)
+            self.selected = [] if self.a.epic_only else ([self.a.only] if self.a.only else self.order)
             pending = self.preflight(self.selected)
             outcome = self.schedule(pending)
             return self.stages() if outcome is None else outcome
@@ -115,13 +115,13 @@ class Runner(
     def stages(self):
         """Verify, then the epic review, each skipped while its result still holds for the epic head."""
         if dirty(self.root):
-            raise RuntimeError("The post-ticket stages require a clean main worktree")
+            raise RuntimeError("The epic stages require a clean main worktree")
         if not self.a.no_verify:
             outcome = self.verify()
             if outcome:
                 return outcome
-        if self.a.no_final_review:
-            say("Epic review skipped (--no-final-review), and with it the ship stage.", GREEN)
+        if self.a.no_epic_review:
+            say("Epic review skipped (--no-epic-review), and with it the ship stage.", GREEN)
             return 0
         outcome = self.review()
         if outcome or self.a.no_ship:

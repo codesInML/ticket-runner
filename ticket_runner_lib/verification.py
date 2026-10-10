@@ -47,7 +47,7 @@ class Verification:
                     break
                 if rec.get("repaired"):
                     return self.epic_fail(rec, "needs-human", f"verify still fails after one repair; fix it in "
-                                          f"{os.path.relpath(wt)} (commit there), then --final-only. Report: "
+                                          f"{os.path.relpath(wt)} (commit there), then --epic-only. Report: "
                                           f"{vdir / 'report.md'}")
                 self.update(rec, phase="repair")
             if not self.verify_repair(rec, wt, vdir):
@@ -79,11 +79,11 @@ class Verification:
         rc = self.shell(self.gate_cmd, wt, log)
         if self.verify_tree_problem(wt, head) or untracked(wt) - before_untracked:
             self.update(rec, unexpectedUntracked=sorted(untracked(wt) - before_untracked))
-            self.epic_fail(rec, "needs-human", "the verify gate changed the worktree; inspect it, then --final-only")
+            self.epic_fail(rec, "needs-human", "the verify gate changed the worktree; inspect it, then --epic-only")
             return False
         if rc:
             self.epic_fail(rec, "needs-human", f"the gate fails after the verify repair; see {log}. "
-                           f"Fix it in {os.path.relpath(wt)}, then --final-only")
+                           f"Fix it in {os.path.relpath(wt)}, then --epic-only")
             return False
         self.update(rec, gatePassed=evidence)
         return True
@@ -111,7 +111,7 @@ class Verification:
         unexpected = set(rec.get("unexpectedUntracked", [])) & untracked(wt)
         if unexpected:
             self.epic_fail(rec, "needs-human", f"unexpected uncommitted files remain in {wt}: "
-                           f"{', '.join(sorted(unexpected))}; commit or remove them, then --final-only")
+                           f"{', '.join(sorted(unexpected))}; commit or remove them, then --epic-only")
             return None
         self.update(rec, drop=("unexpectedUntracked",))
         resuming = self.a.resume and rec.get("phase") == "repair" and \
@@ -125,7 +125,7 @@ class Verification:
             else:
                 git(wt, "merge", "-q", "--ff-only", tip)
         if problem:
-            self.epic_fail(rec, "needs-human", f"{problem}; fix it, then --final-only")
+            self.epic_fail(rec, "needs-human", f"{problem}; fix it, then --epic-only")
             return None
         self.provision(wt)
         self.update(rec, status="in-progress", head=tip, worktree=str(wt), drop=("reason",))
@@ -148,7 +148,7 @@ class Verification:
             if self.verify_tree_problem(wt, expected_head) or untracked(wt) - before_untracked:
                 self.update(rec, unexpectedUntracked=sorted(untracked(wt) - before_untracked))
                 self.epic_fail(rec, "needs-human", f"verify command changed tracked code, HEAD, or worktree "
-                               f"configuration; inspect {wt}, then --final-only")
+                               f"configuration; inspect {wt}, then --epic-only")
                 return None
         if any(r["rc"] for r in results):
             runtime = {"status": "not-run", "reason": "verify commands failed"} if self.cfg["serve"] else \
@@ -202,10 +202,10 @@ class Verification:
             if self.verify_tree_problem(wt, head) or untracked(wt) - verifier_untracked:
                 self.update(rec, unexpectedUntracked=sorted(untracked(wt) - verifier_untracked))
                 return {"status": "stuck", "reason": f"the verifier changed {os.path.relpath(wt)}, but it must "
-                        "be read-only; inspect the worktree, then --final-only"}
+                        "be read-only; inspect the worktree, then --epic-only"}
             if check["status"] != "reported":
                 return {"status": "stuck", "agent": check["status"], "reason": f"the verifier ended "
-                        f"{check['status']}; --resume --final-only continues it (logs in {vdir / 'check'})"}
+                        f"{check['status']}; --resume --epic-only continues it (logs in {vdir / 'check'})"}
             result = verdict(text, r"VERIFY=(PASS|FAIL)")
             if result == "MISSING":
                 return {"status": "stuck", "reason": f"the verifier gave no VERIFY= line; see {vdir / 'check'}"}
@@ -302,7 +302,7 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
         if rep["status"] != "reported":
             self.epic_fail(rec, rep["status"] if not left else "needs-human",
                            f"the verify repair ended {rep['status']}; work kept in {os.path.relpath(wt)}; "
-                           "--resume --final-only continues it")
+                           "--resume --epic-only continues it")
             return False
         self.update(rec, repaired=True)
         status = verdict(text)
@@ -312,7 +312,7 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
             self.update(rec, phase=None)
             self.epic_fail(rec, "needs-human", f"the verify repair ended status={status}"
                            f"{'; ' + problem if problem else ''}; see {vdir / 'repair'}. Fix it in "
-                           f"{os.path.relpath(wt)}, then --final-only")
+                           f"{os.path.relpath(wt)}, then --epic-only")
             return False
         return True
 
@@ -328,7 +328,7 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
             if touched:
                 return self.epic_fail(rec, "needs-human", f"the verify repair changed protected files "
                                       f"({', '.join(touched.split())}); revert those commits in "
-                                      f"{os.path.relpath(wt)}, then --final-only")
+                                      f"{os.path.relpath(wt)}, then --epic-only")
             with self.integration:
                 self.check_main()
                 git(self.root, "merge", "-q", "--ff-only", branch)
