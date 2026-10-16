@@ -32,8 +32,9 @@ class AgentProcesses:
         if session and record.get("backend", "commandcode") != self.backend.name:
             session = None  # a session saved by the other CLI cannot be resumed by this one
         number = record.get("attempts", 0) + 1
+        # Kept once a record has one, so a commandcode attempt after a claude-api one can resume its own session.
         self.update(record, attempts=number, model=model, effort=effort, maxTurns=turns,
-                    **({"backend": self.backend.name} if self.claude else {}))
+                    **({"backend": self.backend.name} if self.claude or "backend" in record else {}))
         budget = self.budgets.get(BUDGET_OF.get(stage, stage)) if self.claude else None
         argv = self.backend.argv(model, effort, turns, prompt, session, cwd, budget, browser)
         stream = self.backend.stream()
@@ -62,6 +63,8 @@ class AgentProcesses:
                     # Session IDs may arrive before the final result, allowing interrupt recovery.
                     if isinstance(sid, str) and sid and sid != record.get("sessionId"):
                         self.update(record, sessionId=sid)
+                    if getattr(stream, "refusal", None):
+                        raise Fatal(stream.refusal)  # killed below, before the session spends anything
                     for event in shown:
                         try:
                             narrate(event, started, tag, color)

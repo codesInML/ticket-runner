@@ -16,7 +16,7 @@ from .processes import attempt, dirty, git, save
 from .prompts import Prompts
 from .review import Reviews
 from .scheduling import Scheduling
-from .settings import BOLD, CLAUDE_PROTECTED, CONFIG, Fatal, GREEN, TICKET_COLORS, YELLOW
+from .settings import BOLD, CLAUDE_CONFIG_DIR, CLAUDE_PROTECTED, CONFIG, Fatal, GREEN, TICKET_COLORS, YELLOW
 from .shipping import Shipping
 from .text import section
 from .tickets import TicketImplementation
@@ -39,7 +39,9 @@ class Runner(
         self.worktrees = root / ".scratch" / "worktrees"
         # The backend holds the company key for its children's environment only; it is never stored or shown.
         self.claude = getattr(a, "backend", "commandcode") == "claude-api"
-        self.backend = ClaudeCode(key) if self.claude else CommandCode()
+        self.backend = ClaudeCode(key, root / CLAUDE_CONFIG_DIR) if self.claude else CommandCode()
+        if self.claude:
+            self.backend.prepare(skills_dir)
         self.binary = self.backend.binary
         self.budgets, self.spent = getattr(a, "budgets", {}), False
         self.gate_cmd = os.getenv("GATE_CMDS") or " && ".join(cfg["gate"]) or "true"

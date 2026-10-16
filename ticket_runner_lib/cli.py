@@ -45,9 +45,10 @@ uses browser-testing-with-devtools when the project config turns the browser on.
 
 A backend is the agent CLI and account of every session in the run, independent of the workflow:
   commandcode  the command-code CLI and its models (default).
-  claude-api   Claude Code in bare mode on the company Anthropic API key, never a personal
-               subscription (docs/adr/0002-*). Every stage must name a Claude model; CLAUDE.md
-               and .claude/ join the protected paths; each session's cost is recorded.
+  claude-api   Claude Code on the company Anthropic API key and a config directory of the
+               runner's own, never a personal subscription (docs/adr/0002-*). Every stage must
+               name a Claude model; CLAUDE.md and .claude/ join the protected paths; each
+               session's cost is recorded.
 """
 
 from pathlib import Path
@@ -116,7 +117,8 @@ Osmani plans: every open sub-ticket needs `## Acceptance criteria` and `## Verif
 must not be XL or likely touch more than 8 files, and must list every dependency under
 `## Blocked by` (or a native link). The plan check refuses otherwise, on --dry-run too;
 --skip-plan-check overrides. The workflow and the backend are saved with the epic's state;
-switching either is refused while any ticket is part-way through.
+switching either is refused while any ticket is part-way through, and a saved backend is only
+left when --backend (or BACKEND) names another.
 
 Requirements: a clean main worktree on the epic branch, and AGENTS.md committed
 on it (ticket worktrees only see committed files). Leave the main worktree alone
@@ -171,7 +173,7 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, TICKET_RUNNER_ANTHROPIC_API_KEY,
     p.add_argument("parent", type=positive)
     p.add_argument("--workflow", choices=WORKFLOWS, default=os.getenv("WORKFLOW"),
                    help="skills the prompts follow (default: the epic's saved workflow, else pocock)")
-    p.add_argument("--backend", default=os.getenv("BACKEND") or "commandcode",
+    p.add_argument("--backend", default=os.getenv("BACKEND") or None,
                    help="agent CLI and account of every session in the run: commandcode (default), or claude-api "
                    "(Claude Code on the company Anthropic API key)")
     p.add_argument("--model", default=os.getenv("IMPL_MODEL"),
@@ -222,6 +224,8 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, TICKET_RUNNER_ANTHROPIC_API_KEY,
     if a.merge and (a.only or a.no_verify or a.no_epic_review or a.no_ship):
         p.error("--merge needs the verify stage, the epic review and the ship stage: drop --only, --no-verify, "
                 "--no-epic-review and --no-ship")
+    # Named by the operator, or defaulted: a defaulted backend never moves a saved epic off its own.
+    a.backend_named, a.backend = a.backend is not None, a.backend or "commandcode"
     if a.backend not in BACKENDS:  # argparse leaves an environment default unchecked
         p.error(f"--backend must be one of {', '.join(BACKENDS)}")
     # Defaults belong to the backend: a flag or env var always wins over them.
@@ -358,6 +362,11 @@ def run_checkout(a, root, folder):
             raise RuntimeError(f"#{a.parent} runs the {was} {kind} and {' '.join(f'#{n}' for n in busy)} "
                                f"{'is' if len(busy) == 1 else 'are'} part-way through; finish them with "
                                f"--{kind} {was}, or reset them, before switching to {now}")
+    saved_backend = data.get("_meta", {}).get("backend")
+    if saved_backend and saved_backend != a.backend and not a.backend_named:
+        # Resuming a claude-api epic without the flag would otherwise move it onto CommandCode's account.
+        raise RuntimeError(f"#{a.parent} runs on the {saved_backend} backend; pass --backend {saved_backend} to "
+                           f"continue it (or --backend {a.backend} to switch)")
     claude = a.backend == "claude-api"
     # The company key is read once, here, and handed only to the runner's Claude Code children.
     key, source = company_key() if claude else (None, None)

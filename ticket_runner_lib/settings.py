@@ -41,8 +41,12 @@ BUDGET_OF = {"fix": "implement", "integration repair": "implement", "verify repa
              "repair review": "epic review"}
 KEYCHAIN_SERVICE = "krim-anthropic-api-key"
 # Removed from every Claude Code session's environment, so nothing but the company key can authenticate it.
-FOREIGN_AUTH = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
-                "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
+# CLAUDE_CODE_OAUTH_TOKEN is a subscription token that works from any config directory.
+FOREIGN_AUTH = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CONFIG_DIR")
+# The runner's Claude Code config directory (relative to the project root) and the settings seeded into it.
+CLAUDE_CONFIG_DIR = ".scratch/claude-config"
+CLAUDE_SETTINGS = {"attribution": {"commit": "", "pr": ""}, "autoMemoryEnabled": False}
 # Claude Code reads these, so on claude-api an agent changing one changes what later sessions are told.
 CLAUDE_PROTECTED = ("CLAUDE.md", ".claude/")
 # Osmani skills the runner names in its prompts. Each links ../../references/*.md, which the

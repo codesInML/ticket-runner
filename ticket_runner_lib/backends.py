@@ -10,7 +10,7 @@ import os
 import re
 import subprocess
 
-from .settings import BROWSER_MCP, BROWSER_TOOLS, FOREIGN_AUTH, KEYCHAIN_SERVICE
+from .settings import BROWSER_MCP, BROWSER_TOOLS, CLAUDE_SETTINGS, FOREIGN_AUTH, KEYCHAIN_SERVICE
 
 
 def number(value):
@@ -73,34 +73,45 @@ class CommandCodeStream:
 
 
 class ClaudeCode:
-    """Claude Code in bare mode, authenticated only by the company key (docs/adr/0002-*)."""
+    """Claude Code on a config directory of the runner's own, authenticated only by the company key
+    (docs/adr/0002-*). The directory holds no login, so a session without the key fails instead of
+    falling back to a personal subscription."""
     name = "claude-api"
 
-    def __init__(self, key):
+    def __init__(self, key, config_dir=None):
         self.binary = os.getenv("CLAUDE_BIN", "claude")
-        self.key = key
+        self.key, self.config_dir = key, config_dir
+
+    def prepare(self, skills_dir):
+        """Seed the config directory: the operator's skills, and settings that keep personal and agent-written
+        context out (no co-author attribution, no auto-memory carried from one session into the next)."""
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        (self.config_dir / "settings.json").write_text(json.dumps(CLAUDE_SETTINGS, indent=2) + "\n")
+        skills = self.config_dir / "skills"
+        if skills.is_symlink() and Path(os.readlink(skills)) != Path(skills_dir):
+            skills.unlink()
+        if not skills.exists() and not skills.is_symlink() and Path(skills_dir).is_dir():
+            skills.symlink_to(skills_dir, target_is_directory=True)
 
     def argv(self, model, effort, turns, prompt, session=None, cwd=None, budget=None, browser=False):
-        argv = [self.binary, "--bare", "-p", prompt, "--model", model, "--output-format", "stream-json",
+        argv = [self.binary, "-p", prompt, "--model", model, "--output-format", "stream-json",
                 "--verbose", "--max-turns", str(turns), "--dangerously-skip-permissions"]
         if effort and effort != "none":
             argv.extend(["--effort", effort])
         if session:
             argv.extend(["--resume", session])
-        # Bare mode skips CLAUDE.md discovery, so the session's own copy is appended. Not redundant.
-        notes = Path(cwd or ".") / "CLAUDE.md"
-        if notes.is_file():
-            argv.extend(["--append-system-prompt-file", str(notes)])
         if budget:
             argv.extend(["--max-budget-usd", f"{budget:g}"])
-        if browser:  # bare mode reads no user MCP config; both flags take lists, so they go last
+        if browser:  # the config directory names no MCP servers; both flags take lists, so they go last
             argv.extend(["--mcp-config", json.dumps(BROWSER_MCP), "--allowedTools", ",".join(BROWSER_TOOLS)])
         return argv
 
     def env(self):
-        """The runner's environment with every other credential removed and the company key added."""
+        """The runner's environment with every other credential removed, the company key added, and the
+        runner's config directory in place of the operator's (which holds their subscription login)."""
         env = {k: v for k, v in os.environ.items() if k not in FOREIGN_AUTH}
-        env["ANTHROPIC_API_KEY"] = self.key
+        env.update(ANTHROPIC_API_KEY=self.key, CLAUDE_CONFIG_DIR=str(self.config_dir),
+                   CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")
         return env
 
     def stream(self):
@@ -135,7 +146,8 @@ TRANSIENT_FLAGS = {"rate_limit", "overloaded", "server_error"}
 # works on codebases whose docs say "rate limit" and "credit" in their own sense.
 ACCOUNT_WORDING = {
     "billing": re.compile(r"\bbilling_error\b|\bcredit balance is too low\b", re.I),
-    "auth": re.compile(r"\bauthentication_error\b|\binvalid x-api-key\b|^\W*(?:API Error: 401\b|Invalid API key\b)",
+    "auth": re.compile(r"\bauthentication_error\b|\binvalid x-api-key\b|"
+                       r"^\W*(?:API Error: 401\b|Invalid API key\b|Not logged in\b)",
                        re.I | re.M),
     "access": re.compile(r"\bpermission_error\b|\breached your specified API usage limits\b|"
                          r"\bThis organization has been disabled\b|\bYour account is on hold\b|^\W*API Error: 403\b",
@@ -161,10 +173,17 @@ class ClaudeStream:
 
     def __init__(self):
         self.result, self.flags, self.alerts, self.tools, self.turns = None, set(), [], {}, set()
+        self.refusal = None
 
     def feed(self, frame):
         kind, events = frame.get("type"), []
         message = frame.get("message") if isinstance(frame.get("message"), dict) else {}
+        if kind == "system" and frame.get("subtype") == "init" and "apiKeySource" in frame \
+                and frame["apiKeySource"] != "ANTHROPIC_API_KEY":
+            # init arrives before the first API call. Any other source (a subscription login reads "none")
+            # would bill someone else, so the run stops before it spends anything.
+            self.refusal = (f"a Claude Code session authenticated with {frame['apiKeySource']!r}, not the company "
+                            "key; stopped before its first API call")
         if kind == "result":
             self.result = frame
         elif kind == "assistant":

@@ -1,5 +1,6 @@
 """The claude-api backend's reading of Claude Code's stream-json: narration, outcome, spend and argv."""
 
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -103,8 +104,9 @@ class OutcomeTests(unittest.TestCase):
 class NarrationTests(unittest.TestCase):
     def test_claude_events_become_the_same_feed(self):
         stream = ClaudeStream()
-        sid, shown = stream.feed({"type": "system", "subtype": "init", "session_id": "abc", "apiKeySource": "x"})
-        self.assertEqual((sid, shown), ("abc", []))
+        sid, shown = stream.feed({"type": "system", "subtype": "init", "session_id": "abc",
+                                  "apiKeySource": "ANTHROPIC_API_KEY"})
+        self.assertEqual((sid, shown, stream.refusal), ("abc", [], None))
         message = {"id": "m1", "content": [{"type": "text", "text": "Looking"},
                                           {"type": "tool_use", "id": "t1", "name": "Bash",
                                            "input": {"command": "ls", "description": "List files"}}]}
@@ -135,30 +137,62 @@ class NarrationTests(unittest.TestCase):
             self.assertEqual(display.tool_color(tool), colors[kind], tool)
 
 
+class AuthTests(unittest.TestCase):
+    def test_init_on_anything_but_the_company_key_is_refused(self):
+        for source in ("none", "/login managed key", "ANTHROPIC_AUTH_TOKEN"):
+            stream = ClaudeStream()
+            stream.feed({"type": "system", "subtype": "init", "session_id": "s", "apiKeySource": source})
+            self.assertIn(repr(source), stream.refusal)
+        stream = ClaudeStream()
+        stream.feed({"type": "system", "subtype": "init", "session_id": "s"})  # no field: nothing to judge
+        self.assertIsNone(stream.refusal)
+
+    def test_not_logged_in_is_an_account_failure(self):
+        # Claude Code 2.1.300's own report of a session with no credentials at all.
+        status, _, _, fatal = ended(failed("Not logged in · Please run /login", "authentication_failed"),
+                                    result(result="Not logged in · Please run /login", api_error_status=None), rc=0)
+        self.assertEqual(status, "provider-error")
+        self.assertIn("invalid or revoked", fatal)
+        self.assertIn("invalid or revoked", ended(result(result="Not logged in · Please run /login"), rc=0)[3])
+
+
 class ArgvTests(unittest.TestCase):
-    def test_bare_argv_appends_claude_md_only_when_the_session_has_one(self):
+    def test_argv_never_bare_and_never_appends_claude_md(self):
         backend = ClaudeCode("sk-test")
         with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "CLAUDE.md").write_text("notes")
             argv = backend.argv("claude-opus-5-5", "none", 9, "do it", None, folder, None, False)
-            self.assertEqual(argv[1:5], ["--bare", "-p", "do it", "--model"])
+            self.assertEqual(argv[1:4], ["-p", "do it", "--model"])
+            self.assertNotIn("--bare", argv)
             self.assertNotIn("--append-system-prompt-file", argv)
             self.assertNotIn("--effort", argv)
-            (Path(folder) / "CLAUDE.md").write_text("notes")
             argv = backend.argv("claude-opus-5-5", "high", 9, "do it", "sess", folder, 2.5, True)
-            self.assertEqual(argv[argv.index("--append-system-prompt-file") + 1], str(Path(folder) / "CLAUDE.md"))
             self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "2.5")
             self.assertEqual(argv[argv.index("--resume") + 1], "sess")
             self.assertEqual(argv[argv.index("--effort") + 1], "high")
             self.assertEqual(argv[-1], ",".join(BROWSER_TOOLS))  # list-taking flags go last
 
-    def test_child_env_carries_only_the_company_key(self):
+    def test_child_env_carries_only_the_company_key_and_the_runners_config_dir(self):
         leaked = {"ANTHROPIC_API_KEY": "personal", "ANTHROPIC_AUTH_TOKEN": "oauth", "ANTHROPIC_BASE_URL": "http://x",
+                  "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat", "CLAUDE_CONFIG_DIR": "/personal",
                   "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_VERTEX": "1", "CLAUDE_CODE_USE_FOUNDRY": "1"}
         with patch.dict(os.environ, leaked):
-            env = ClaudeCode("sk-company").env()
+            env = ClaudeCode("sk-company", Path("/runner/config")).env()
             self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "personal")  # the runner's own env is untouched
-        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-company")
-        self.assertFalse(set(leaked) - {"ANTHROPIC_API_KEY"} & set(env))
+        self.assertEqual((env.pop("ANTHROPIC_API_KEY"), env.pop("CLAUDE_CONFIG_DIR")), ("sk-company", "/runner/config"))
+        self.assertFalse(set(leaked) & set(env))
+
+    def test_prepare_seeds_skills_and_settings_and_follows_a_moved_skills_dir(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "a").mkdir()
+            (root / "b").mkdir()
+            backend = ClaudeCode("sk", root / "config")
+            backend.prepare(root / "a")
+            self.assertEqual((root / "config/skills").resolve(), (root / "a").resolve())
+            self.assertFalse(json.loads((root / "config/settings.json").read_text())["autoMemoryEnabled"])
+            backend.prepare(root / "b")
+            self.assertEqual((root / "config/skills").resolve(), (root / "b").resolve())
 
     def test_key_from_env_wins_and_an_empty_one_does_not_count(self):
         with patch.dict(os.environ, {"TICKET_RUNNER_ANTHROPIC_API_KEY": "sk-env"}):

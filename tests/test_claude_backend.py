@@ -24,7 +24,8 @@ with open(os.environ['AGENT_LOG'], 'a') as f:
 with open(os.environ['ENV_LOG'], 'a') as f:
     __import__('fcntl').flock(f, 2)
     f.write(json.dumps({k: os.environ.get(k) for k in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
-        'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY')}) + '\\n')
+        'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
+        'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY')}) + '\\n')
 mode = os.environ.get('MODE', 'success')
 resumed = args[args.index('--resume') + 1] if '--resume' in args else None
 model = args[args.index('--model') + 1]
@@ -51,8 +52,13 @@ def commit(name, text):
     subprocess.run(['git', 'add', name], check=True)
     subprocess.run(['git', 'commit', '-qm', 'Change ' + name], check=True)
 session = resumed or ('session-' + ticket)
-emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'apiKeySource': 'ANTHROPIC_API_KEY',
-      'model': model, 'tools': ['Bash', 'Read', 'Edit']})
+# A session that found a subscription login instead of the key, as Claude Code reports it.
+source = 'none' if mode == 'subscription' else 'ANTHROPIC_API_KEY'
+emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'apiKeySource': source,
+      'model': model, 'tools': ['Task', 'Bash', 'Read', 'Edit', 'Write', 'Skill']})
+if mode == 'subscription':
+    time.sleep(30)  # stopped by the runner before any API call
+    (root / 'fake-bin' / 'spent-on-subscription').write_text('spent')
 emit({'type': 'assistant', 'session_id': session, 'parent_tool_use_id': None, 'message': {'id': 'msg_1', 'content': [
     {'type': 'text', 'text': 'Looking around'},
     {'type': 'tool_use', 'id': 'tu_1', 'name': 'Bash', 'input': {'command': 'ls', 'description': 'List files'}}]}})
@@ -118,6 +124,7 @@ class ClaudeBackendTests(base.RunnerTests):
         self.env.update(CLAUDE_BIN=str(self.bin / "claude"), ENV_LOG=str(self.root / "env.log"),
                         TICKET_RUNNER_ANTHROPIC_API_KEY=KEY, ANTHROPIC_API_KEY="sk-personal",
                         ANTHROPIC_AUTH_TOKEN="oauth-personal", ANTHROPIC_BASE_URL="http://proxy.invalid",
+                        CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-personal", CLAUDE_CONFIG_DIR="/personal/config",
                         CLAUDE_CODE_USE_BEDROCK="1")
         for name in ("BACKEND", "TICKET_RUNNER_KEYCHAIN_SERVICE", *(f"{s}_MAX_BUDGET_USD" for s in (
                 "IMPL", "TICKET_REVIEW", "EPIC_REVIEW", "VERIFY", "LAUNCH_PLAN"))):
@@ -140,7 +147,7 @@ class ClaudeBackendTests(base.RunnerTests):
             if path.is_file():
                 self.assertNotIn(KEY, path.read_text(errors="replace"), path)
 
-    def test_every_stage_runs_bare_on_claude_with_only_the_company_key(self):
+    def test_every_stage_runs_on_the_runners_config_dir_with_only_the_company_key(self):
         self.configure(gate=['python3 -c "import os; open(os.environ[\'ROOT\'] + \'/gate-env.log\', \'a\')'
                              '.write(str(os.environ.get(\'ANTHROPIC_API_KEY\')) + chr(10))"'])
         result = self.run_claude()
@@ -148,7 +155,7 @@ class ClaudeBackendTests(base.RunnerTests):
         self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'launch plan'])
         calls = self.calls()
         for call in calls:
-            self.assertEqual(call[:2], ['--bare', '-p'])
+            self.assertEqual(call[0], '-p')  # never --bare: it withholds sub-agents, Write and Skill
             for flag in ('--output-format', '--verbose', '--max-turns', '--dangerously-skip-permissions'):
                 self.assertIn(flag, call)
             self.assertEqual(call[call.index('--output-format') + 1], 'stream-json')
@@ -157,9 +164,15 @@ class ClaudeBackendTests(base.RunnerTests):
                          [('claude-sonnet-5-5', 'medium')] * 2 + [('claude-opus-5-5', 'high'), ('claude-haiku-5-5', 'low')])
         self.assertIn('Use only your own tools and sub-agents', self.prompt(calls[0]))
         self.assertNotIn('Use only CommandCode', self.prompt(calls[2]))
+        config = self.root.resolve() / '.scratch/claude-config'
         for env in self.envs():
-            self.assertEqual(env['ANTHROPIC_API_KEY'], KEY)
-            self.assertEqual([v for k, v in env.items() if k != 'ANTHROPIC_API_KEY'], [None] * 5)
+            self.assertEqual(env.pop('ANTHROPIC_API_KEY'), KEY)
+            self.assertEqual(Path(env.pop('CLAUDE_CONFIG_DIR')).resolve(), config)  # holds no login
+            self.assertEqual(env.pop('CLAUDE_CODE_DISABLE_AUTO_MEMORY'), '1')
+            self.assertEqual(list(env.values()), [None] * 6)
+        self.assertEqual(json.loads((config / 'settings.json').read_text()),
+                         {'attribution': {'commit': '', 'pr': ''}, 'autoMemoryEnabled': False})
+        self.assertEqual((config / 'skills').resolve(), Path(self.env['AGENT_SKILLS_DIR']).resolve())
         gate = (self.root / 'gate-env.log').read_text().split()
         self.assertEqual(gate, ['sk-personal'] * 2)  # the runner's own commands never get the company key
         state = self.state()
@@ -264,15 +277,12 @@ class ClaudeBackendTests(base.RunnerTests):
         self.git('add', 'CLAUDE.md', '.claude/settings.json', '.gitignore')
         self.git('commit', '-qm', 'Claude notes')
 
-    def test_claude_md_is_appended_and_protected_with_the_tracked_claude_dir(self):
+    def test_claude_md_is_protected_with_the_tracked_claude_dir(self):
         self.claude_files()
         result = self.run_claude(mode='operator-claude-dir')
         self.assertEqual(result.returncode, 0, result.stderr)
-        implement, review = self.calls()[0], self.call('epic review')
-        root = self.root.resolve()
-        self.assertEqual(implement[implement.index('--append-system-prompt-file') + 1],
-                         str(root / '.scratch/worktrees/209/CLAUDE.md'))
-        self.assertEqual(review[review.index('--append-system-prompt-file') + 1], str(root / 'CLAUDE.md'))
+        implement = self.calls()[0]
+        self.assertNotIn('--append-system-prompt-file', implement)  # Claude Code discovers it itself
         self.assertIn('CLAUDE.md, .claude/', self.prompt(implement))
         for mode, expected in (('edit-claude-md', 'CLAUDE.md'), ('edit-claude-settings', '.claude/settings.json')):
             with self.subTest(mode=mode):
@@ -339,6 +349,24 @@ class ClaudeBackendTests(base.RunnerTests):
         result = self.run_claude()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual({e['ANTHROPIC_API_KEY'] for e in self.envs()}, {KEY})
+
+    def test_a_session_on_anything_but_the_company_key_stops_the_run_before_it_spends(self):
+        result = self.run_claude(mode='subscription')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("authenticated with 'none', not the company key", result.stdout + result.stderr)
+        time.sleep(0.5)
+        self.assertFalse((self.bin / 'spent-on-subscription').exists())
+        self.assertEqual(self.state()['209']['status'], 'interrupted')  # --resume once the key is fixed
+
+    def test_a_saved_backend_is_only_left_when_one_is_named(self):
+        self.assertEqual(self.run_claude('--only', '209').returncode, 0)
+        result = self.run_script()  # plain ticket-runner: no --backend
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('runs on the claude-api backend; pass --backend claude-api', result.stderr)
+        self.assertEqual(self.state()['_meta']['backend'], 'claude-api')
+        self.env['BACKEND'] = 'commandcode'
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(self.state()['_meta']['backend'], 'commandcode')
 
     def test_backend_switch_is_refused_while_a_ticket_is_part_way(self):
         self.assertEqual(self.run_script(mode='human').returncode, 1)
