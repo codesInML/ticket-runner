@@ -133,6 +133,7 @@ only when the epic touches auth, untrusted input or personal or sensitive data, 
 BLOCKING is a real correctness or security defect in this epic, a broken integration between tickets, or
 an UNMET requirement or checkpoint. DEFERRED is a real defect the epic does not own: pre-existing code, or
 out of the epic's scope. Style and taste are not findings. Write "None." when there are none.
+Put nothing else under FINDINGS: any summary belongs in the sections above.
 {self.READ_ONLY}End with exactly one line: VERDICT=SHIP when nothing is BLOCKING, otherwise VERDICT=FIX-FIRST.
 """
 

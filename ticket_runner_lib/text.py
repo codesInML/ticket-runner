@@ -50,15 +50,18 @@ def review_rows(body, verbs):
     """Parse every report entry, retaining indented evidence; reject partial reports."""
     if empty(body):
         return [], None
-    parsed = []
+    parsed, entry = [], None
     for line in body.splitlines():
         if not line.strip():
             continue
         matches = rows(line, verbs)
         if matches:
-            parsed.append(list(matches[0]))
-        elif parsed and re.match(r"^ {2,}\S", line) and not re.match(r"^\s*[-*+]\s", line):
-            parsed[-1][2] += "\n" + line.strip()
+            entry = list(matches[0])
+            parsed.append(entry)
+        elif entry and re.match(r"^ {2,}\S", line) and not re.match(r"^\s*[-*+]\s", line):
+            entry[2] += "\n" + line.strip()
+        elif re.match(r"^\S", line) and not re.match(r"^(?:[>|]\s*)*(?:[-*+]\s|\d+[.)]\s|[*_`]*[A-Z]\d+\b)", line):
+            entry = None  # Closing prose, not an entry: nothing after it is evidence.
         else:
             return [], "unparsed report entry: " + line.strip()
     if any(empty(evidence) or not evidence.strip(" \t—–-:*_`") for _, _, evidence in parsed):

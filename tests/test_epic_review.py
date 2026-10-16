@@ -73,6 +73,19 @@ class ReviewInputTests(unittest.TestCase):
             with self.subTest(report=report):
                 self.assertIsNotNone(review_rows(report, ('CONFIRMED',))[1])
 
+    def test_parser_skips_closing_prose_but_not_malformed_entries(self):
+        report = ('- D1 DEFERRED a.ts:1 — wrong — evidence\n\n'
+                  'Per instructions, formatting-only deviations are not findings. No BLOCKING defects found.')
+        entries, problem = review_rows(report, ('BLOCKING', 'DEFERRED'))
+        self.assertIsNone(problem)
+        self.assertEqual([('D1', 'DEFERRED')], [(i, c) for i, c, _ in entries])
+        self.assertNotIn('Per instructions', entries[0][2])
+        for line in ('- D2 BLOKING a.ts:2 — typo', 'D2: a.ts:2 is broken', '1. a.ts:2 is broken',
+                     '**D2** BLOKING a.ts:2 — typo', '- a.ts:2 is broken', '* a.ts:2 is broken',
+                     '> - a.ts:2 is broken', '`D2` BLOKING a.ts:2'):
+            with self.subTest(line=line):
+                self.assertIsNotNone(review_rows(report + '\n' + line, ('BLOCKING', 'DEFERRED'))[1])
+
     def test_repair_verdict_cannot_hide_blocking_findings(self):
         _, problem = EpicReview().parse_findings(
             '## FINDINGS\n- R1 BLOCKING fixed.py:1 — wrong — code evidence\nVERDICT=PASS',
