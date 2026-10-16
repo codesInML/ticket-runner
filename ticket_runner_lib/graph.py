@@ -1,6 +1,6 @@
 """Dependency scheduling helpers and terminal graph rendering."""
 
-from .display import fit, paint
+from .display import dollars, fit, paint
 from .settings import BLUE, BOLD, CYAN, DIM, GREEN, RED, YELLOW
 
 
@@ -44,12 +44,14 @@ def classify(blockers, done, running=(), failed=(), deferred=(), skipped=()):
             for n, bs in blockers.items()}
 
 
-def render_graph(levels, tickets, kinds, labels=None):
-    """Wave-by-wave picture of the epic; a wave that is all done collapses to one line."""
+def render_graph(levels, tickets, kinds, labels=None, spent=None):
+    """Wave-by-wave picture of the epic; a wave that is all done collapses to one line. `spent` is the epic's
+    cost so far, shown only once a session has reported one."""
     labels = labels or {}
     counts = [f"{sum(k == kind for k in kinds.values())} {kind}" for kind in KINDS
               if any(k == kind for k in kinds.values())]
-    lines = [paint("Ticket graph: ", BOLD) + " · ".join(counts)]
+    lines = [paint("Ticket graph: ", BOLD) + " · ".join(counts)
+             + (paint(f" · {dollars(spent)} spent", DIM) if spent is not None else "")]
     for i, level in enumerate(levels, 1):
         wave = f"  wave {i:<2} "
         if all(kinds[n] == "done" for n in level):

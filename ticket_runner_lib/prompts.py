@@ -81,8 +81,7 @@ another ticket's job (name it when you know it). Zombie code (dead, unreachable 
 the files this ticket changes is DEFERRED, never BLOCKING. Write "None." when there are none.
 ## REJECTED: findings you considered and dismissed (style, taste, a misread), one line each.
 Read-only review: do not edit files, commit, change branches, push, or post comments.
-Use only CommandCode for agent work; do not invoke codex or claude CLIs.
-End with exactly one line: VERDICT=PASS when nothing is BLOCKING, otherwise VERDICT=FAIL.
+{self.agent_rule()}End with exactly one line: VERDICT=PASS when nothing is BLOCKING, otherwise VERDICT=FAIL.
 """
 
     def verifier_prompt(self, wt):
@@ -100,13 +99,19 @@ exact command and the output that decides it. Use the IDs from checks.md, each e
 check (it needs production data, a third party, or a human judgement); say why. A check you could run
 but did not is not UNVERIFIABLE.
 Read-only: do not edit files, commit, change branches, push, or post comments; stop only processes you started.
-Use only CommandCode for agent work; do not invoke codex or claude CLIs.
-End with exactly one line: VERIFY=FAIL when any check is FAILED, otherwise VERIFY=PASS.
+{self.agent_rule()}End with exactly one line: VERIFY=FAIL when any check is FAILED, otherwise VERIFY=PASS.
 """
 
-    READ_ONLY = """Read-only: do not edit files, commit, change branches, push, or post comments.
-Use only CommandCode for agent work; do not invoke codex or claude CLIs.
-"""
+    def agent_rule(self, work="agent work"):
+        """Which agent CLI a session may use for sub-agents: its own backend, never another."""
+        if self.claude:
+            return (f"Use only your own tools and sub-agents for {work}; do not invoke the codex, claude or "
+                    "command-code CLIs.\n")
+        return f"Use only CommandCode for {work}; do not invoke codex or claude CLIs.\n"
+
+    @property
+    def read_only(self):
+        return "Read-only: do not edit files, commit, change branches, push, or post comments.\n" + self.agent_rule()
 
     def epic_review_prompt(self, rv, r):
         """Round one: one reviewer, on its own, over the whole epic diff."""
@@ -134,7 +139,7 @@ BLOCKING is a real correctness or security defect in this epic, a broken integra
 an UNMET requirement or checkpoint. DEFERRED is a real defect the epic does not own: pre-existing code, or
 out of the epic's scope. Style and taste are not findings. Write "None." when there are none.
 Put nothing else under FINDINGS: any summary belongs in the sections above.
-{self.READ_ONLY}End with exactly one line: VERDICT=SHIP when nothing is BLOCKING, otherwise VERDICT=FIX-FIRST.
+{self.read_only}End with exactly one line: VERDICT=SHIP when nothing is BLOCKING, otherwise VERDICT=FIX-FIRST.
 """
 
     def check_prompt(self, rv, r, other, targets, report, follow=False):
@@ -152,12 +157,12 @@ and correctly classified, DISPUTED when it does not. {rules}Answer each of these
 ## ANSWERS: one line per ID: - {targets[0]} CONFIRMED <evidence>, or - {targets[0]} DISPUTED <evidence>
 ## WITHDRAWN: any of your own findings ({own}) that its report shows you got wrong, one line each:
 - {r['letter']}1 WITHDRAWN <why>. Write "None." when there are none.
-{self.READ_ONLY}End with exactly one line: CHECK=DONE
+{self.read_only}End with exactly one line: CHECK=DONE
 """
         return f"""Self-check for epic #{self.a.parent}: no second reviewer checks your findings, so re-check each one
 against the code now: CONFIRMED when the code bears it out, WITHDRAWN when it does not. {rules}Answer each of these IDs exactly once: {ids}
 ## ANSWERS: one line per ID: - {targets[0]} CONFIRMED <evidence>, or - {targets[0]} WITHDRAWN <why>
-{self.READ_ONLY}End with exactly one line: CHECK=DONE
+{self.read_only}End with exactly one line: CHECK=DONE
 """
 
     def ticket_writer_prompt(self, rv, drafts, asked):
@@ -190,8 +195,7 @@ None, or the numbers of the drafts that must land first (for example: 01)
 The finding IDs this ticket fixes (for example: D1, G2)
 Every finding ID above appears in exactly one ticket's Findings. Keep each ticket to at most 8 files.
 {self.domain()}{again}Do not edit any other file, commit, change branches, push, or post comments.
-Use only CommandCode for agent work; do not invoke codex or claude CLIs.
-End with exactly one line: STATUS=COMPLETE, or STATUS=NEEDS_HUMAN when a fix needs a human decision (say which).
+{self.agent_rule()}End with exactly one line: STATUS=COMPLETE, or STATUS=NEEDS_HUMAN when a fix needs a human decision (say which).
 """
 
     def follow_up_prompt(self, rv, r):
@@ -207,7 +211,7 @@ IDs: {', '.join(targets)}
 ## FINDINGS: only problems the fix diff itself introduced, numbered on from {r['letter']}{max(used, default=0) + 1}, in the
 same shape as before: BLOCKING for a defect the fixes caused, DEFERRED for anything else you notice.
 Anything outside the fix diff is out of scope. Write "None." when there are none.
-{self.READ_ONLY}End with exactly one line: FOLLOW-UP=DONE
+{self.read_only}End with exactly one line: FOLLOW-UP=DONE
 """
 
     def repair_review_prompt(self, wt, tip, vdir):
@@ -218,5 +222,5 @@ at {vdir / 'repair' / 'final.txt'}. Follow {self.skill_file('code-review-and-qua
 does it break anything the epic needs?
 {self.domain()}## FINDINGS: one line per finding: - R1 BLOCKING path/to/file.ts:42 — what is wrong — the evidence.
 Write "None." when there are none.
-{self.READ_ONLY}End with exactly one line: VERDICT=PASS when nothing is BLOCKING, otherwise VERDICT=FAIL.
+{self.read_only}End with exactly one line: VERDICT=PASS when nothing is BLOCKING, otherwise VERDICT=FAIL.
 """

@@ -118,7 +118,7 @@ class Scheduling:
         labels.update({n: "needs " + " ".join(map(ref, unmet)) for n, unmet in self.deferred.items()})
         skipped = set(self.order) - set(self.selected) - done
         kinds = classify(self.blockers, done, self.threads, stuck, self.deferred, skipped)
-        say("\n" + render_graph(self.levels, self.tickets, kinds, labels) + "\n")
+        say("\n" + render_graph(self.levels, self.tickets, kinds, labels, self.spent_total()) + "\n")
 
     def stop(self):
         with self.spawn:

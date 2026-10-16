@@ -32,7 +32,7 @@ class Reviews:
             folder = tdir / "review" / f"round-{round_}"
             text = self.run_agent(model, self.a.ticket_review_effort, self.a.ticket_review_max_turns,
                                   self.review_prompt(n, tdir, base, round_), folder, rec, session, cwd=wt,
-                                  tag=f"#{n} review", color=color)
+                                  tag=f"#{n} review", color=color, stage="ticket review")
             self.guard()
             if dirty(wt) or git(wt, "rev-parse", "HEAD") != head or self.check_worktree(wt, branch):
                 return self.fail(n, record, "needs-human", f"the ticket review changed {os.path.relpath(wt)}, "
@@ -75,7 +75,7 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
             prompt += (f"\nYou stopped earlier to ask a human. Read their answer in the latest comments of "
                        f"gh issue view {n} --comments, then continue.\n")
         text = self.run_agent(self.a.model, self.a.effort, self.a.max_turns, prompt, tdir / "fix", record,
-                              record.get("sessionId"), cwd=wt, tag=f"#{n}", color=color)
+                              record.get("sessionId"), cwd=wt, tag=f"#{n}", color=color, stage="fix")
         self.guard()
         if record["status"] != "reported":
             self.fail(n, record, record["status"], f"fix round ended {record['status']}; partial work kept in "

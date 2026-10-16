@@ -8,11 +8,11 @@ import shutil
 import subprocess
 import time
 
-from .display import say
+from .display import dollars, say
 from .github import discover, gh_json
 from .graph import waves
 from .processes import attempt, dirty, git
-from .settings import BLUE, BOLD, DIM, FIX_LABEL, GREEN, MODELS, RETRYABLE, REVIEW_PROTOCOL, YELLOW
+from .settings import BLUE, BOLD, CLAUDE_MODELS, DIM, FIX_LABEL, GREEN, MODELS, RETRYABLE, REVIEW_PROTOCOL, YELLOW
 from .text import empty, review_rows, section, verdict
 
 
@@ -23,7 +23,7 @@ STEPS = {"review": "independent review", "check": "cross-examination", "tickets"
 
 def reviewer_name(model):
     """The name a person calls a model by: its alias (deepseek over flash), else its last path part."""
-    names = [alias for alias, full in MODELS.items() if full == model]
+    names = [alias for aliases in (MODELS, CLAUDE_MODELS) for alias, full in aliases.items() if full == model]
     return "deepseek" if "deepseek" in names else names[0] if names else model.rsplit("/", 1)[-1]
 
 
@@ -143,7 +143,7 @@ class EpicReview:
             color = self.stage_color(rv["reviewers"].index(r))
             jobs.append(lambda r=r, folder=folder, text=text, session=session, color=color: self.run_agent(
                 r["model"], a.epic_review_effort, a.epic_review_max_turns, text, folder, r, session,
-                tag=f"epic review · {r['name']}", color=color))
+                tag=f"epic review · {r['name']}", color=color, stage="epic review"))
         say(f"\n━━ Epic review of #{a.parent}: {STEPS[step]} with {' and '.join(r['name'] for r in todo)} ━━",
             BOLD, BLUE)
         texts = self.parallel(jobs)
@@ -507,9 +507,12 @@ class EpicReview:
         for n in self.order:
             if n in closed or self.tickets[n]["state"] == "CLOSED":
                 continue
+            spent = [c["costUsd"] for owner, c in self.costs() if owner == f"#{n}"]
+            cost = f" Cost: {dollars(sum(spent))} (estimated)." \
+                if spent and getattr(self.a, "post_costs", False) else ""
             result = subprocess.run(["gh", "issue", "close", str(n), "--comment",
                                      f"Integrated into `{self.epic}` at `{rv['head'][:8]}`; the epic review of "
-                                     f"#{self.a.parent} said SHIP."], capture_output=True, text=True)
+                                     f"#{self.a.parent} said SHIP.{cost}"], capture_output=True, text=True)
             if result.returncode:
                 say(f"Warning: could not close #{n} ({result.stderr.strip()}); the next run tries again",
                     YELLOW, err=True)

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# The ticket runner on the claude-api backend: every session on Claude Code, billed to the company
+# Anthropic API key. Composes with --workflow osmani. See --help.
+set -euo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"; [[ $src == /* ]] || src="$dir/$src"
+done
+exec "$(cd -P "$(dirname "$src")" && pwd)/ticket-runner" --backend claude-api "$@"

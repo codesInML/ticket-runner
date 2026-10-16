@@ -84,8 +84,8 @@ Read the full ticket at {tdir / 'ticket.md'}. Satisfy its acceptance criteria wi
 Use TDD at appropriate seams; decide and document seams yourself in this unattended run.
 Run typechecking, targeted tests, the full suite once, and the workflow's code review before finishing.
 """
-        prompt += f"""Use only CommandCode for any agent/review work; do not invoke codex or claude CLIs.
-You are in a dedicated git worktree for this ticket. Other tickets of this epic run in parallel in
+        prompt += self.agent_rule("any agent/review work")
+        prompt += f"""You are in a dedicated git worktree for this ticket. Other tickets of this epic run in parallel in
 their own worktrees; the runner integrates them, so ignore them.
 Commit buildable work onto the current branch {branch}, referencing #{n}.
 Do not push, open PRs, change branches, rebase, merge, or add co-author trailers. Do not modify the
@@ -100,6 +100,9 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
         text = self.run_agent(self.a.model, self.a.effort, self.a.max_turns, prompt, tdir, record,
                               session, cwd=wt, tag=f"#{n}", color=color)
         self.guard()
+        if record["status"] == "budget-cap":
+            return self.fail(n, record, "budget-cap", f"partial work kept in {os.path.relpath(wt)}; the budget ran "
+                             "out, not the ticket: --resume continues it with a fresh budget")
         if record["status"] != "reported":
             return self.fail(n, record, record["status"], f"partial work kept in {os.path.relpath(wt)}; retry with "
                              f"--resume --max-turns {self.a.max_turns * 2}")

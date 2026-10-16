@@ -155,7 +155,8 @@ or modify the runner or {self.hands_off}.
     def repair(self, n, record, tdir, tip, prompt):
         branch, wt = self.branch(n), Path(record["worktree"])
         text = self.run_agent(self.a.model, self.a.effort, self.a.max_turns, prompt, tdir, record,
-                              record.get("sessionId"), cwd=wt, tag=f"#{n}", color=self.color(n))
+                              record.get("sessionId"), cwd=wt, tag=f"#{n}", color=self.color(n),
+                              stage="integration repair")
         self.guard()
         if record["status"] != "reported":
             ended = record["status"]

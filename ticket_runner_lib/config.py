@@ -173,7 +173,7 @@ def stage_refusals(a, cfg, root):
         refusals.append(f"serveEnv {env} does not exist; create it, or remove serve from {CONFIG}")
     elif (root / ".env").exists() and (root / env).resolve() == (root / ".env").resolve():
         refusals.append("serveEnv must not be the developer's .env; give the app its own env file")
-    if cfg["browser"]:
+    if cfg["browser"] and getattr(a, "backend", "commandcode") == "commandcode":  # claude-api passes it inline
         listed = subprocess.run([os.getenv("COMMANDCODE_BIN", "command-code"), "mcp", "list"],
                                 capture_output=True, text=True)
         if not re.search(rf"(?<![\w-]){BROWSER_SERVER}(?![\w-])", listed.stdout + listed.stderr):
