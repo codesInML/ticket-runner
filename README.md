@@ -1,9 +1,45 @@
 # Ticket runner
 
 Run `bin/ticket-runner --help` for workflow, configuration, and resume options.
-`bin/ticket-runner-osmani` selects the Osmani workflow. Both commands use the
-`ticket_runner.py` entry point and require the adjacent `ticket_runner_lib`
+`bin/ticket-runner-osmani` selects the Osmani workflow, and `bin/ticket-runner-claude` the
+claude-api backend; the two compose (`ticket-runner-claude 207 --workflow osmani`). Every
+command uses the `ticket_runner.py` entry point and requires the adjacent `ticket_runner_lib`
 package.
+
+## Backends
+
+A backend is the agent CLI and account of every session in a run (`--backend`, env `BACKEND`):
+
+- `commandcode` (default): the `command-code` CLI (`COMMANDCODE_BIN`) and its models.
+- `claude-api`: Claude Code (`CLAUDE_BIN`, default `claude`) in bare mode, billed to the company
+  Anthropic API key and never to a personal subscription. See `docs/adr/0002-*` for why.
+
+The key comes from `TICKET_RUNNER_ANTHROPIC_API_KEY`, else the macOS Keychain item
+`krim-anthropic-api-key` (`TICKET_RUNNER_KEYCHAIN_SERVICE` names another). Store it once with
+`security add-generic-password -s krim-anthropic-api-key -a "$USER" -w`. Without a key the run,
+and its `--dry-run`, refuse. The key is read once and set only in each Claude Code session's
+environment, with every other Anthropic credential and provider switch removed; the runner's own
+gate, verify and install commands never see it, and it is never logged or saved.
+
+On claude-api the stages default to `sonnet` (implement, fix and repair sessions, verifier, at
+`medium`), `opus` (one epic reviewer that re-checks its own findings, at `high`; the osmani ticket
+review, at `medium`) and `haiku` (launch plan, at `low`). Every stage model must be a Claude model
+(`sonnet`, `opus`, `haiku` or a full `claude-*` ID), checked before anything is spent. CLAUDE.md
+and `.claude/` join the protected paths, and the runner appends the session's CLAUDE.md itself,
+since bare mode does not read it. The backend is saved with the epic; switching it is refused while
+a ticket is part-way through.
+
+Each Claude Code session's cost, tokens, turns and time are recorded per attempt in `state.json`
+(a resumed session's earlier spend is subtracted, as Claude Code reports session totals). The
+ticket graph shows the epic's running total and the run ends with a table by stage and ticket;
+`--post-costs` also puts each ticket's cost in its done comment and the table on the epic issue.
+`IMPL_MAX_BUDGET_USD`, `TICKET_REVIEW_MAX_BUDGET_USD`, `EPIC_REVIEW_MAX_BUDGET_USD`,
+`VERIFY_MAX_BUDGET_USD` and `LAUNCH_PLAN_MAX_BUDGET_USD` cap each session of their stage; a session
+that reaches its cap ends `budget-cap`, which `--resume` continues with a fresh budget.
+
+An account failure (credit balance too low, a revoked key, a spend limit) stops every ticket at
+once; top up or fix the key, then `--resume`. Rate limits and overloads end only the session, as
+`provider-error`.
 
 ## Code layout
 
@@ -12,7 +48,8 @@ package.
 - `scheduling.py`: concurrent scheduling, dependency waits, and interruption.
 - `tickets.py`: individual ticket implementation and lifecycle.
 - `worktrees.py`: provisioning, integration, gates, and conflict repair.
-- `agents.py`: CommandCode sessions and logged shell processes.
+- `agents.py`: agent sessions on the run's backend, their cost, and logged shell processes.
+- `backends.py`: each backend's CLI argv and environment, event stream, and session outcome.
 - `prompts.py`: stage prompts and skill guidance.
 - `review.py`: ticket reviews and their fix round.
 - `epic_review.py`: the epic review: reviewers, cross-examination, fix tickets, the follow-up
@@ -32,7 +69,7 @@ modules do not import the workflow classes.
 ## Tests
 
 Run `python3 -m unittest discover -s tests -q`. The integration suite uses
-temporary git repositories and fake GitHub and CommandCode executables. Runtime
+temporary git repositories and fake GitHub, CommandCode, Claude Code and keychain executables. Runtime
 verification tests also start a temporary server on localhost.
 
 ## Integration and recovery guarantees
