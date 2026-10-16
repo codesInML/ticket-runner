@@ -83,6 +83,7 @@ elif args[:2] == ['issue', 'create']:
     issues['created'].append({'number': n, 'title': opt('--title'), 'body': Path(opt('--body-file')).read_text(),
                               'state': 'OPEN'})
     issues_file.write_text(json.dumps(issues))
+    if os.environ.get('CREATE_RESULT_LOST') == 'crash': os.kill(os.getppid(), 9)
     if os.environ.get('CREATE_RESULT_LOST'): sys.exit(1)
     print('https://github.com/acme/engine/issues/%d' % n)
 elif args[:2] == ['issue', 'close']:
@@ -1221,11 +1222,18 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.state()['400']['status'], 'done')
         self.assertEqual(len(self.created_issues()), 1)
 
-    def test_epic_only_recovers_issue_created_before_filing_result_was_saved(self):
+    def test_lost_create_result_is_found_in_the_same_run(self):
         self.env['CREATE_RESULT_LOST'] = '1'
-        self.assertEqual(self.run_script(mode='fix').returncode, 1)
+        result = self.run_script(mode='fix')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.created_issues()), 1)
+        self.assertEqual(self.state()['_review']['filed'], {'01': 400})
+
+    def test_epic_only_recovers_issue_created_before_filing_result_was_saved(self):
+        self.env['CREATE_RESULT_LOST'] = 'crash'
+        self.assertNotEqual(self.run_script(mode='fix').returncode, 0)
         self.assertEqual(self.state()['_review']['phase'], 'file')
-        self.assertEqual(self.state()['_review']['filed'], {})
+        self.assertEqual(self.state()['_review'].get('filed', {}), {})
         self.assertEqual(len(self.created_issues()), 1)
         self.env.pop('CREATE_RESULT_LOST')
         self.issues.append({'number': 211, 'title': 'Unfinished ordinary ticket',

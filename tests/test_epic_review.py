@@ -1,9 +1,43 @@
 """Focused checks for report parsing and review input boundaries."""
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from ticket_runner_lib.epic_review import EpicReview
 from ticket_runner_lib.text import review_rows
+
+
+class FixTicketFilingTests(unittest.TestCase):
+    MARKER = '<!-- ticket-runner: epic #628 review a00a1e4a9268 draft 01 -->'
+
+    def file(self, listings, creates):
+        review = EpicReview()
+        review.link_fix_ticket = mock.Mock()
+        runs = [SimpleNamespace(returncode=code, stdout=out, stderr=err) for code, out, err in creates]
+        with mock.patch('ticket_runner_lib.epic_review.gh_json', side_effect=listings), \
+                mock.patch('ticket_runner_lib.epic_review.subprocess.run', side_effect=runs) as run, \
+                mock.patch('ticket_runner_lib.epic_review.time.sleep'):
+            result = review.create_fix_ticket('Fix', 'draft.md', self.MARKER)
+        return result, run.call_count, review.link_fix_ticket
+
+    def test_a_dropped_connection_is_retried(self):
+        timeout = (1, '', 'Post "https://api.github.com/graphql": dial tcp 140.82.121.5:443: i/o timeout')
+        result, creates, link = self.file([[], []], [timeout, (0, 'https://github.com/o/r/issues/700\n', '')])
+        self.assertEqual(result, (700, None))
+        self.assertEqual(creates, 2)
+        link.assert_called_once_with(700)
+
+    def test_a_create_github_accepted_is_found_not_filed_twice(self):
+        timeout = (1, '', 'i/o timeout')
+        result, creates, _ = self.file([[], [{'number': 700, 'body': f'Fix\n{self.MARKER}\n'}]], [timeout])
+        self.assertEqual(result, (700, None))
+        self.assertEqual(creates, 1)
+
+    def test_a_connection_that_stays_down_is_reported(self):
+        result, creates, link = self.file([[]] * 4, [(1, '', 'i/o timeout')] * 4)
+        self.assertEqual(result, (None, 'i/o timeout'))
+        self.assertEqual(creates, 4)
+        link.assert_not_called()
 
 
 class ReviewInputTests(unittest.TestCase):

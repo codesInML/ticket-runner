@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 
 from .display import say
 from .github import discover, gh_json
@@ -338,31 +339,50 @@ class EpicReview:
 
     def file_tickets(self, rv):
         """File each draft as a sub-issue of the epic, blockers first; a marker makes a retry find its issue."""
-        filed, existing = rv.setdefault("filed", {}), None
+        filed = rv.setdefault("filed", {})
         (self.review_dir() / "filed").mkdir(parents=True, exist_ok=True)
         for d in rv["drafts"]:
             if d["num"] in filed:
                 continue
             marker = f"<!-- ticket-runner: epic #{self.a.parent} review {rv['start'][:12]} draft {d['num']} -->"
-            if existing is None:
-                existing = gh_json("issue", "list", "--state", "all", "--limit", "1000", "--json", "number,body")
-            number = next((i["number"] for i in existing if marker in (i.get("body") or "")), None)
-            if number is None:
-                path = self.review_dir() / "filed" / f"{d['num']}.md"
-                path.write_text(self.fix_ticket_body(rv, d, filed, marker))
-                created = subprocess.run(["gh", "issue", "create", "--title", d["title"], "--body-file", str(path)],
-                                         capture_output=True, text=True)
-                found = re.search(r"/issues/(\d+)", created.stdout)
-                if created.returncode or not found:
-                    return self.epic_fail(rv, "needs-human", f"could not file fix ticket draft {d['num']} "
-                                          f"({created.stderr.strip() or created.stdout.strip()}); --epic-only retries")
-                number = int(found[1])
-                self.link_fix_ticket(number)
+            path = self.review_dir() / "filed" / f"{d['num']}.md"
+            path.write_text(self.fix_ticket_body(rv, d, filed, marker))
+            number, problem = self.create_fix_ticket(d["title"], path, marker)
+            if problem:
+                return self.epic_fail(rv, "needs-human", f"could not file fix ticket draft {d['num']} "
+                                      f"({problem}); --epic-only retries")
             with self.state:
                 filed[d["num"]] = number
                 self.persist()
             say(f"Fix ticket #{number}: {d['title']}", BOLD)
         self.update(rv, phase="fix", fixTickets=[filed[d["num"]] for d in rv["drafts"]])
+
+    def create_fix_ticket(self, title, path, marker, tries=4):
+        """The draft's issue number and no problem, or a problem; a dropped connection is retried.
+
+        Before every create the marker is looked up, so a create that GitHub accepted but whose reply
+        was lost is found rather than filed twice.
+        """
+        problem = None
+        for attempt_no in range(tries):
+            if attempt_no:
+                time.sleep(attempt_no * 5)
+            try:
+                existing = gh_json("issue", "list", "--state", "all", "--limit", "1000", "--json", "number,body")
+            except RuntimeError as error:
+                problem = str(error)
+                continue
+            number = next((i["number"] for i in existing if marker in (i.get("body") or "")), None)
+            if number is not None:
+                return number, None
+            created = subprocess.run(["gh", "issue", "create", "--title", title, "--body-file", str(path)],
+                                     capture_output=True, text=True)
+            found = re.search(r"/issues/(\d+)", created.stdout)
+            if not created.returncode and found:
+                self.link_fix_ticket(int(found[1]))
+                return int(found[1]), None
+            problem = created.stderr.strip() or created.stdout.strip()
+        return None, problem
 
     def fix_ticket_body(self, rv, d, filed, marker):
         body = re.sub(r"\A\s*#\s+[^\n]*\n", "", d["body"])
