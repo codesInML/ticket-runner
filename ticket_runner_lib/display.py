@@ -6,7 +6,12 @@ import shutil
 import sys
 import time
 
-from .settings import AGENT_TEXT, BOLD, COLOR, DIM, FILE_TOOLS, PRINT, RED, TOOL_COLORS, WRITE_TOOLS, YELLOW
+from .settings import (AGENT_TEXT, BOLD, COLOR, DIM, FILE_TOOLS, PRINT, RED, SHELL_TOOLS, TOOL_COLORS, WRITE_TOOLS,
+                       YELLOW)
+
+
+# Claude Code's file tools name their file in file_path, or notebook_path.
+CLAUDE_FILE_TOOLS = {"Read", "Edit", "Write", "MultiEdit", "NotebookEdit"}
 
 
 def paint(text, *codes):
@@ -27,19 +32,22 @@ def fit(text, used=0):
 def describe(tool, args):
     if not isinstance(args, dict):
         return str(args)
-    if tool in FILE_TOOLS:
-        return os.path.relpath(args["file_path"]) if args.get("file_path") else ""
-    if tool == "shell_command":
+    if tool in FILE_TOOLS | CLAUDE_FILE_TOOLS:
+        path = args.get("file_path") or args.get("notebook_path")
+        return os.path.relpath(path) if path else ""
+    if tool in SHELL_TOOLS:
         return args.get("description") or args.get("command", "")
-    if tool in {"grep", "glob"}:
+    if tool in {"grep", "glob", "Grep", "Glob"}:
         return f"{args.get('pattern', '')}  {os.path.relpath(args.get('path') or '.')}"
+    if tool == "WebFetch" and args.get("url"):
+        return args["url"]
     return os.path.relpath(args["path"]) if args.get("path") else json.dumps(args)[:200]
 
 
 def tool_color(tool):
     """One colour per kind of tool, the same in every session."""
     kind = "mcp" if tool.startswith("mcp__") else "write" if tool in WRITE_TOOLS else \
-        "shell" if tool == "shell_command" else "read"
+        "shell" if tool in SHELL_TOOLS else "read"
     return TOOL_COLORS[kind]
 
 
@@ -75,3 +83,15 @@ def narrate(event, started, tag, color):
         say(f"{head} {paint('↻ ' + kind.replace('_', ' '), YELLOW)} {fit(detail, used + 16)}")
     elif kind == "run_error":
         say(f"{head} {paint('run error', RED, BOLD)} {message(event.get('error'))}")
+
+
+def span(seconds):
+    """A session's length the way a person says it: 45s, 14m, 2h 5m."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    return f"{seconds // 60}m" if seconds < 3600 else f"{seconds // 3600}h {seconds // 60 % 60}m"
+
+
+def dollars(amount):
+    return f"${amount:,.2f}"
