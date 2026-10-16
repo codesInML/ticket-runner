@@ -23,6 +23,11 @@ _Avoid_: Repair ticket, follow-up ticket
 **Workflow**:
 The skill set an epic's prompts follow: pocock or osmani.
 
+**Backend**:
+The agent CLI and account every session of a run uses: commandcode, or claude-api (Claude Code billed to a
+company Anthropic API key).
+_Avoid_: Engine, harness, provider
+
 ## Stages
 
 **Epic stages**:
@@ -30,7 +35,8 @@ Everything after the tickets: epic review, verify and ship, each pinned to the e
 _Avoid_: Final stages, post-ticket stages
 
 **Ticket review**:
-A read-only review of one ticket's diff by a different model family, before it integrates (osmani only).
+A read-only review of one ticket's diff by a different model family, before it integrates (osmani only). On
+the claude-api backend it is a different model of the same family.
 
 **Epic review**:
 The review of the whole epic diff by one or two reviewers, ending in SHIP or in fix tickets.
