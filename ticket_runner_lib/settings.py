@@ -42,13 +42,15 @@ BUDGET_OF = {"fix": "implement", "integration repair": "implement", "verify repa
 KEYCHAIN_SERVICE = "krim-anthropic-api-key"
 # Removed from every Claude Code session's environment, so nothing but the company key can authenticate it.
 # CLAUDE_CODE_OAUTH_TOKEN is a subscription token that works from any config directory.
-FOREIGN_AUTH = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
-                "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CONFIG_DIR")
+FOREIGN_AUTH = ("TICKET_RUNNER_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CONFIG_DIR", "CCR_OAUTH_TOKEN_FILE", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+                "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR")
 # The runner's Claude Code config directory (relative to the project root) and the settings seeded into it.
 CLAUDE_CONFIG_DIR = ".scratch/claude-config"
 CLAUDE_SETTINGS = {"attribution": {"commit": "", "pr": ""}, "autoMemoryEnabled": False}
 # Claude Code reads these, so on claude-api an agent changing one changes what later sessions are told.
-CLAUDE_PROTECTED = ("CLAUDE.md", ".claude/")
+CLAUDE_PROTECTED = ("CLAUDE.md", ".claude/", "CLAUDE.local.md",
+                    ":(glob)**/CLAUDE.md", ":(glob)**/CLAUDE.local.md")
 # Osmani skills the runner names in its prompts. Each links ../../references/*.md, which the
 # skills installer leaves out; the preflight refuses to run while any of those files is missing.
 # Skills each stage's prompts name.

@@ -94,6 +94,9 @@ if mode == 'edit-claude-settings': (root / '.claude/settings.json').write_text('
 if mode == 'operator-claude-dir':  # what the operator's own sessions do there while the runner works
     (root / '.claude/settings.local.json').write_text('{"local": 2}')
     (root / '.claude/worktrees/other').mkdir(parents=True, exist_ok=True)
+if mode == 'commit-nested-claude-md': commit('src/CLAUDE.md', 'injected instructions')
+if mode == 'commit-local-claude-md': commit('CLAUDE.local.md', 'injected instructions')
+if mode == 'edit-nested-claude-md': (root / 'src').mkdir(exist_ok=True); (root / 'src/CLAUDE.md').write_text('injected')
 if mode == 'commit-claude-md': commit('CLAUDE.md', 'changed in a ticket')
 if mode == 'commit-claude-dir': commit('.claude/agents/new.md', 'changed in a ticket')
 capped = mode in ('max-turns', 'budget') and not resumed and ticket == '209'
@@ -208,6 +211,30 @@ class ClaudeBackendTests(base.RunnerTests):
         self.assertIn('Cost of epic #207 so far (estimated): $6.25', result.stdout)  # 2.50 + 1.25 x 3
         self.assertNotIn(['issue', 'comment', '207'], [c[:3] for c in self.gh_calls()])  # --post-costs is off
 
+    def test_replaced_review_and_launch_plan_keep_their_costs(self):
+        first = self.run_claude()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn('Cost of epic #207 so far (estimated): $5.00', first.stdout)
+        (self.root / 'README.md').write_text('New epic change\n')
+        self.git('add', 'README.md')
+        self.git('commit', '-qm', 'New epic change')
+        second = self.run_claude('--epic-only')
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn('Cost of epic #207 so far (estimated): $7.50', second.stdout)
+        ledger = self.state()['_costs']
+        self.assertEqual(sum(c['entry']['costUsd'] for c in ledger), 7.5)
+        self.assertEqual([c['owner'] for c in ledger].count('epic'), 4)
+
+    def test_company_override_never_reaches_gate_or_github_on_either_backend(self):
+        gh = self.bin / 'gh'
+        gh.write_text(gh.read_text().replace('args=sys.argv[1:]',
+            'assert "TICKET_RUNNER_ANTHROPIC_API_KEY" not in os.environ\nargs=sys.argv[1:]'))
+        self.configure(gate=['python3 -c "import os; assert \'TICKET_RUNNER_ANTHROPIC_API_KEY\' not in os.environ"'])
+        result = self.run_claude()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_script('--backend', 'commandcode', '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_post_costs_comments_on_the_tickets_and_the_epic_but_never_the_pull_request(self):
         result = self.run_claude('--post-costs')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -284,7 +311,8 @@ class ClaudeBackendTests(base.RunnerTests):
         implement = self.calls()[0]
         self.assertNotIn('--append-system-prompt-file', implement)  # Claude Code discovers it itself
         self.assertIn('CLAUDE.md, .claude/', self.prompt(implement))
-        for mode, expected in (('edit-claude-md', 'CLAUDE.md'), ('edit-claude-settings', '.claude/settings.json')):
+        for mode, expected in (('edit-claude-md', 'CLAUDE.md'), ('edit-claude-settings', '.claude/settings.json'),
+                               ('edit-nested-claude-md', 'src/CLAUDE.md')):
             with self.subTest(mode=mode):
                 self.setUp()
                 self.claude_files()
@@ -294,7 +322,8 @@ class ClaudeBackendTests(base.RunnerTests):
                 self.assertIn(expected, result.stderr)
 
     def test_a_ticket_touching_claude_files_is_not_integrated(self):
-        for mode, expected in (('commit-claude-md', 'CLAUDE.md'), ('commit-claude-dir', '.claude/agents/new.md')):
+        for mode, expected in (('commit-claude-md', 'CLAUDE.md'), ('commit-claude-dir', '.claude/agents/new.md'),
+                               ('commit-nested-claude-md', 'src/CLAUDE.md'), ('commit-local-claude-md', 'CLAUDE.local.md')):
             with self.subTest(mode=mode):
                 self.setUp()
                 result = self.run_claude(mode=mode)

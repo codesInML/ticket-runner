@@ -23,19 +23,23 @@ environment, with every other Anthropic credential and provider switch removed; 
 gate, verify and install commands never see it, and it is never logged or saved. The config
 directory holds no login, so a session without the key fails rather than reaching a subscription,
 and a session whose init reports any `apiKeySource` but the key stops the run before its first API
-call. The directory links your skills (`AGENT_SKILLS_DIR`) and turns off commit attribution and
+call. Only the runner-owned user settings load (`--setting-sources user`); project settings cannot
+replace the key, endpoint or provider. Project CLAUDE.md discovery and normal tools remain available.
+The directory links your skills (`AGENT_SKILLS_DIR`) and turns off commit attribution and
 auto-memory.
 
 On claude-api the stages default to `sonnet` (implement, fix and repair sessions, verifier, at
 `medium`), `opus` (one epic reviewer that re-checks its own findings, at `high`; the osmani ticket
 review, at `medium`) and `haiku` (launch plan, at `low`). Every stage model must be a Claude model
-(`sonnet`, `opus`, `haiku` or a full `claude-*` ID), checked before anything is spent. CLAUDE.md
+(`sonnet`, `opus`, `haiku` or a full `claude-*` ID), checked before anything is spent. CLAUDE.md and CLAUDE.local.md at every project depth
 and `.claude/` join the protected paths, since Claude Code reads them. The backend is saved with
 the epic: switching it is refused while a ticket is part-way through, and a run that does not name
 a backend refuses to move a saved epic off its own.
 
 Each Claude Code session's cost, tokens, turns and time are recorded per attempt in `state.json`
-(a resumed session's earlier spend is subtracted, as Claude Code reports session totals). The
+(a resumed session's earlier spend is subtracted, as Claude Code reports session totals). An append-only
+epic cost ledger preserves spending when a review or launch plan is replaced; older state migrates its
+remaining costs once. The
 ticket graph shows the epic's running total and the run ends with a table by stage and ticket;
 `--post-costs` also puts each ticket's cost in its done comment and the table on the epic issue.
 `IMPL_MAX_BUDGET_USD`, `TICKET_REVIEW_MAX_BUDGET_USD`, `EPIC_REVIEW_MAX_BUDGET_USD`,

@@ -47,7 +47,7 @@ A backend is the agent CLI and account of every session in the run, independent 
   commandcode  the command-code CLI and its models (default).
   claude-api   Claude Code on the company Anthropic API key and a config directory of the
                runner's own, never a personal subscription (docs/adr/0002-*). Every stage must
-               name a Claude model; CLAUDE.md and .claude/ join the protected paths; each
+               name a Claude model; CLAUDE.md, CLAUDE.local.md and .claude/ join the protected paths; each
                session's cost is recorded.
 """
 
@@ -321,6 +321,9 @@ def epic_base(a):
 
 def main():
     a = parse_args()
+    # Capture before any git/GitHub/install child; even other backends must not inherit the override.
+    override = os.environ.pop("TICKET_RUNNER_ANTHROPIC_API_KEY", "").strip()
+    a.company_credentials = ((override, "env") if override else company_key()) if a.backend == "claude-api" else (None, None)
     root = Path(command("git", "rev-parse", "--show-toplevel"))
     os.chdir(root)
     folder = root / ".scratch" / "run-tickets-commandcode" / str(a.parent)
@@ -369,7 +372,7 @@ def run_checkout(a, root, folder):
                            f"continue it (or --backend {a.backend} to switch)")
     claude = a.backend == "claude-api"
     # The company key is read once, here, and handed only to the runner's Claude Code children.
-    key, source = company_key() if claude else (None, None)
+    key, source = a.company_credentials
     osmani = a.workflow == "osmani"
     review = "off" if a.no_epic_review else (f"{' + '.join(a.epic_review_models)} @ {a.epic_review_effort}, "
                                              f"{a.epic_review_max_turns} turns")

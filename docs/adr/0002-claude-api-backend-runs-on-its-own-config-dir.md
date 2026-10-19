@@ -26,10 +26,16 @@ stage still needs `command-code`.
 
 - The config directory is seeded with a link to the operator's skills and settings that turn off commit
   attribution and auto-memory: personal memory and global CLAUDE.md never steer company-billed runs, and
-  agents cannot leave notes that steer later sessions. Project CLAUDE.md is still discovered as usual, so
-  CLAUDE.md and `.claude/` join the protected paths on this backend.
+  agents cannot leave notes that steer later sessions. Only the runner-owned user settings load (`--setting-sources user`), so a project settings
+  `env` block cannot replace the injected key, endpoint or provider. Project CLAUDE.md is still discovered
+  as usual; CLAUDE.md and CLAUDE.local.md at every project depth and `.claude/` join the protected paths.
+  Untracked `.claude/worktrees/` and local settings remain operator-owned. Confirmed with Claude Code
+  2.1.303 using fake keys and init-only hooks: project env overrides apply when project/local settings
+  load and cannot override the company key with user settings alone; normal mode retains Task, Write
+  and Skill tools.
 - `CLAUDE_CODE_OAUTH_TOKEN` works from any config directory, so it is stripped from every session's
-  environment along with the other Anthropic credentials and provider switches.
+  environment along with all inherited `ANTHROPIC_*` variables, token-file/descriptor handoffs and
+  `CLAUDE_CODE_USE_*` provider switches. An init that exposes a different provider also stops the run.
 - The key is read from the macOS Keychain (or `TICKET_RUNNER_ANTHROPIC_API_KEY`) and set only in each
   child's environment, so the operator's interactive Claude Code stays on the subscription. An agent can
   still read it from its own environment.

@@ -121,13 +121,10 @@ class Scheduling:
         say("\n" + render_graph(self.levels, self.tickets, kinds, labels, self.spent_total()) + "\n")
 
     def stop(self):
-        with self.spawn:
-            self.stopping.set()
-            children = list(self.children)
-        for child in children:
-            kill(child)
+        self.cancel_children()
         for thread in self.threads.values():
-            thread.join(timeout=30)
+            if thread is not threading.current_thread():
+                thread.join(timeout=30)
         with self.state:
             for n in self.threads:
                 record = self.data.get(str(n), {})

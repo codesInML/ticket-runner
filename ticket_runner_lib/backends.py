@@ -94,8 +94,11 @@ class ClaudeCode:
             skills.symlink_to(skills_dir, target_is_directory=True)
 
     def argv(self, model, effort, turns, prompt, session=None, cwd=None, budget=None, browser=False):
+        # Settings sources do not control CLAUDE.md, skills or normal-mode tools. Project env/settings
+        # must not override the company key or endpoint after the child environment is constructed.
         argv = [self.binary, "-p", prompt, "--model", model, "--output-format", "stream-json",
-                "--verbose", "--max-turns", str(turns), "--dangerously-skip-permissions"]
+                "--verbose", "--max-turns", str(turns), "--dangerously-skip-permissions",
+                "--setting-sources", "user"]
         if effort and effort != "none":
             argv.extend(["--effort", effort])
         if session:
@@ -109,7 +112,8 @@ class ClaudeCode:
     def env(self):
         """The runner's environment with every other credential removed, the company key added, and the
         runner's config directory in place of the operator's (which holds their subscription login)."""
-        env = {k: v for k, v in os.environ.items() if k not in FOREIGN_AUTH}
+        env = {k: v for k, v in os.environ.items() if k not in FOREIGN_AUTH
+               and not k.startswith(("CLAUDE_CODE_USE_", "ANTHROPIC_"))}
         env.update(ANTHROPIC_API_KEY=self.key, CLAUDE_CONFIG_DIR=str(self.config_dir),
                    CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")
         return env
@@ -120,7 +124,7 @@ class ClaudeCode:
 
 def company_key():
     """The company Anthropic API key and where it came from, or (None, None). Never printed or stored."""
-    key = os.environ.get("TICKET_RUNNER_ANTHROPIC_API_KEY", "").strip()
+    key = os.environ.pop("TICKET_RUNNER_ANTHROPIC_API_KEY", "").strip()
     if key:
         return key, "env"
     service = os.environ.get("TICKET_RUNNER_KEYCHAIN_SERVICE") or KEYCHAIN_SERVICE
@@ -184,6 +188,8 @@ class ClaudeStream:
             # would bill someone else, so the run stops before it spends anything.
             self.refusal = (f"a Claude Code session authenticated with {frame['apiKeySource']!r}, not the company "
                             "key; stopped before its first API call")
+        if kind == "system" and frame.get("subtype") == "init" and frame.get("apiProvider") not in (None, "anthropic", "firstParty"):
+            self.refusal = "a Claude Code session selected a different API provider; stopped before its first API call"
         if kind == "result":
             self.result = frame
         elif kind == "assistant":

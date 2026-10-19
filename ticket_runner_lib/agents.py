@@ -1,5 +1,6 @@
 """Agent sessions on the run's backend, their spend, and logged shell processes."""
 
+import copy
 import json
 import os
 import subprocess
@@ -97,6 +98,8 @@ class AgentProcesses:
     def spend(self, record, stage, model, effort, spent, session, status, label):
         """Keep one attempt's spend. A resumed Claude Code session reports the whole session's totals, restored
         from its transcript, so what the session's earlier attempts already counted is subtracted."""
+        with self.state:
+            self.costs()  # migrate legacy records before this attempt is added
         costs = list(record.get("costs", []))
         totals = {"costUsd": spent["costUsd"], **spent.get("usage", {})}
         base = next((c["session"] for c in reversed(costs) if session and c.get("sessionId") == session
@@ -110,7 +113,23 @@ class AgentProcesses:
         entry.update({k: spent[k] for k in ("numTurns", "durationMs") if k in spent})
         entry.update(sessionId=record.get("sessionId"), session=totals)
         costs.append(entry)
-        self.update(record, costs=costs, costUsd=round(sum(c["costUsd"] for c in costs), 6))
+        with self.state:
+            owner = "epic"
+            def contains(node):
+                if node is record:
+                    return True
+                if isinstance(node, dict):
+                    return any(contains(v) for k, v in node.items() if k != "costs")
+                if isinstance(node, list):
+                    return any(contains(v) for v in node)
+                return False
+            for key, value in self.data.items():
+                if key.isdigit() and contains(value):
+                    owner = f"#{key}"
+                    break
+            self.data["_costs"].append({"owner": owner, "entry": copy.deepcopy(entry)})
+            record.update(costs=costs, costUsd=round(sum(c["costUsd"] for c in costs), 6))
+            self.persist()  # ledger and resumed-session baseline are one atomic checkpoint
         self.spent = True
         parts = [f"{'✓' if status == 'reported' else '✗'} {label}", dollars(entry["costUsd"])]
         parts += [f"{entry['numTurns']} turns"] if entry.get("numTurns") else []
@@ -131,9 +150,11 @@ class AgentProcesses:
                 for value in node:
                     walk(value, owner)
         with self.state:
-            for key, value in self.data.items():
-                walk(value, f"#{key}" if key.isdigit() else "epic")
-        return found
+            if "_costs" not in self.data:
+                for key, value in self.data.items():
+                    walk(value, f"#{key}" if key.isdigit() else "epic")
+                self.data["_costs"] = [{"owner": owner, "entry": copy.deepcopy(entry)} for owner, entry in found]
+            return [(c["owner"], copy.deepcopy(c["entry"])) for c in self.data["_costs"]]
 
     def spent_total(self):
         found = self.costs()
@@ -177,8 +198,16 @@ class AgentProcesses:
             say(f"Warning: could not post the cost table on #{self.a.parent} ({result.stderr.strip()}); it is in "
                 f"{body}", YELLOW, err=True)
 
+    def cancel_children(self):
+        """Prevent further spawns and terminate active process groups; joining belongs to the caller."""
+        with self.spawn:
+            self.stopping.set()
+            children = list(self.children)
+        for child in children:
+            kill(child)
+
     def parallel(self, jobs):
-        """Run agent sessions at once; their results in order. A failure in any is raised after all finish."""
+        """Run sessions at once; return results in order. Run-wide failures cancel siblings immediately."""
         if len(jobs) == 1:
             return [jobs[0]()]
         results, errors = [None] * len(jobs), [None] * len(jobs)
@@ -188,6 +217,11 @@ class AgentProcesses:
                 results[i] = job()
             except BaseException as exc:  # handed to the main thread below
                 errors[i] = exc
+                if isinstance(exc, Fatal):
+                    with self.spawn:
+                        if self.fatal is None:
+                            self.fatal = exc
+                    self.cancel_children()
 
         threads = [threading.Thread(target=run, args=(i, job), daemon=True) for i, job in enumerate(jobs)]
         for thread in threads:
@@ -201,6 +235,8 @@ class AgentProcesses:
             for thread in threads:
                 thread.join(30)
             raise
+        if self.fatal is not None:
+            raise self.fatal
         for exc in errors:
             if exc is not None:
                 raise exc

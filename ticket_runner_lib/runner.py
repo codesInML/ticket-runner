@@ -51,6 +51,7 @@ class Runner(
         self.state, self.integration, self.spawn = threading.RLock(), threading.Lock(), threading.Lock()
         self.children, self.threads, self.events = set(), {}, queue.Queue()
         self.stopping, self.fatal = threading.Event(), None
+        self.costs()  # migrate legacy costs before any replaceable stage records are reset
         home = Path(__file__).resolve().parents[1]
         project = ["AGENTS.md", CONFIG, *cfg["linkFiles"], *([cfg["serveEnv"]] if cfg["serveEnv"] else []),
                    *(CLAUDE_PROTECTED if self.claude else ())]
@@ -60,9 +61,10 @@ class Runner(
         claude_dir = attempt(root, "ls-files", "-z", "--", ".claude").stdout.split("\0") if self.claude else []
         protected = [home / "ticket_runner.py", home / "bin/ticket-runner", home / "bin/ticket-runner-osmani",
                      home / "bin/ticket-runner-claude", *sorted((home / "ticket_runner_lib").glob("*.py")),
-                     *(root / f for f in project if not f.endswith("/")), *(root / f for f in claude_dir if f)]
+                     *(root / f for f in project if not f.endswith("/") and not f.startswith(":(glob)")), *(root / f for f in claude_dir if f)]
         # A protected file that is missing now must stay missing: an agent creating one counts as changing it.
-        self.snapshots = {p: p.read_bytes() if p.exists() else None for p in protected}
+        self.instruction_paths = self.claude_instructions() if self.claude else set()
+        self.snapshots = {p: p.read_bytes() if p.exists() else None for p in [*protected, *self.instruction_paths]}
         self.protected = list(dict.fromkeys([*project, *(str(p.relative_to(root)) for p in protected
                                                        if p.is_relative_to(root)
                                                        and ".claude" not in p.relative_to(root).parts)]))
@@ -104,8 +106,20 @@ class Runner(
         launch plan 5."""
         return TICKET_COLORS[-1 - i % len(TICKET_COLORS)]
 
+    def claude_instructions(self):
+        """Discover instruction inputs without traversing disposable worktrees or dependencies."""
+        found = {self.root / "CLAUDE.md", self.root / "CLAUDE.local.md"}
+        excluded = {self.root / name for name in (".git", ".scratch", *self.cfg["dependencyDirs"])}
+        for folder, dirs, files in os.walk(self.root):
+            dirs[:] = [d for d in dirs if Path(folder) / d not in excluded and
+                       not (Path(folder).name == ".claude" and d == "worktrees")]
+            found.update(Path(folder) / name for name in files if name in ("CLAUDE.md", "CLAUDE.local.md"))
+        return found
+
     def guard(self):
         changed = [p for p, contents in self.snapshots.items() if (p.read_bytes() if p.exists() else None) != contents]
+        if self.claude:
+            changed.extend(sorted(self.claude_instructions() - self.instruction_paths))
         if changed:
             raise Fatal(f"Agent modified {', '.join(map(str, changed))}; inspect and restore before resuming")
         if git(self.root, "branch", "--show-current") != self.epic:
