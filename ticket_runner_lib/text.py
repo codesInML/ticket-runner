@@ -46,6 +46,11 @@ def empty(body):
     return not body or bool(re.fullmatch(r"[\s*_-]*none\.?[\s*_]*", body, re.I))
 
 
+def says_none(body):
+    """A section that opens with "None", perhaps giving its reason after: "None. The only change …"."""
+    return empty(body) or bool(re.match(r"[\s*_-]*none[\s*_]*(?:[.:;—–-]|$)", body, re.I | re.M))
+
+
 def review_rows(body, verbs):
     """Parse every report entry, retaining indented evidence; reject partial reports."""
     if empty(body):

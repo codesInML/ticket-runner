@@ -13,7 +13,7 @@ from .github import discover, gh_json
 from .graph import waves
 from .processes import attempt, dirty, git
 from .settings import BLUE, BOLD, CLAUDE_MODELS, DIM, FIX_LABEL, GREEN, MODELS, RETRYABLE, REVIEW_PROTOCOL, YELLOW
-from .text import empty, review_rows, section, verdict
+from .text import empty, review_rows, says_none, section, verdict
 
 
 FINDING = ("BLOCKING", "DEFERRED")
@@ -202,7 +202,7 @@ exactly one line for your report as it stands: {line}.
         if problem:
             return None, problem
         ids = [i for i, _, _ in found]
-        if not found and not empty(body):
+        if not found and not says_none(body):
             return None, f"FINDINGS lines are not in the `- {r['letter']}1 BLOCKING file:line — …` shape"
         if any(i[0] != r["letter"] for i in ids):
             return None, f"its finding IDs must start with {r['letter']}"
