@@ -4,7 +4,7 @@ import os
 
 from .display import say
 from .processes import attempt, dirty, git
-from .settings import BOLD, Fatal, RED, RETRYABLE, Stop, YELLOW
+from .settings import BOLD, Fatal, GREEN, RED, RETRYABLE, Stop, YELLOW
 from .text import verdict
 
 
@@ -87,7 +87,9 @@ Run typechecking, targeted tests, the full suite once, and the workflow's code r
         prompt += self.agent_rule("any agent/review work")
         prompt += f"""You are in a dedicated git worktree for this ticket. Other tickets of this epic run in parallel in
 their own worktrees; the runner integrates them, so ignore them.
-Commit buildable work onto the current branch {branch}, referencing #{n}.
+Commit buildable work onto the current branch {branch}, referencing #{n}. A ticket whose acceptance
+criteria need no repository change (tracker-only work, or work already on the epic branch) makes no
+commit and still ends STATUS=COMPLETE.
 Do not push, open PRs, change branches, rebase, merge, or add co-author trailers. Do not modify the
 runner, {self.hands_off}, agent configuration, hooks, or anything under {self.folder}. Existing partial
 edits/commits from this ticket are yours to finish when resuming. Pre-ticket commit: {base}.
@@ -109,10 +111,16 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
         status = verdict(text)
         commits = int(git(wt, "rev-list", "--count", f"{base}..HEAD"))
         problem = self.check_worktree(wt, branch)
-        if status == "COMPLETE" and commits and not dirty(wt) and not problem and self.osmani:
+        complete = status == "COMPLETE" and not dirty(wt) and not problem
+        if complete and not commits:
+            with self.integration:
+                self.finish(n, record, git(self.root, "rev-parse", "HEAD"))
+                say(f"#{n} complete with no commits; nothing to review or integrate", GREEN, BOLD)
+                self.cleanup(n)
+        elif complete and self.osmani:
             self.update(record, status="ready-to-review", phase="review", drop=("reason",))
             say(f"#{n} implemented ({commits} commit{'s' * (commits != 1)}); handing to ticket review", BOLD, color)
-        elif status == "COMPLETE" and commits and not dirty(wt) and not problem:
+        elif complete:
             self.update(record, status="ready-to-merge", phase="integrate", drop=("reason",))
             say(f"#{n} implemented ({commits} commit{'s' * (commits != 1)}); waiting to integrate", BOLD, color)
         elif status == "NEEDS_HUMAN" and not dirty(wt) and not problem:

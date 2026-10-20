@@ -127,8 +127,7 @@ or modify the runner or {self.hands_off}.
         git(self.root, "merge", "-q", "--ff-only", branch)
         self.guard()
         head = git(self.root, "rev-parse", "HEAD")
-        self.update(record, status="done", head=head, drop=("reason",))
-        self.label(n, "agent-done", "in-progress")
+        self.finish(n, record, head)
         count = git(self.root, "rev-list", "--count", f"{tip}..{head}")
         say(f"#{n} merged into {self.epic} ({count} commit{'s' * (count != '1')}, now {head[:8]})", GREEN, BOLD)
         if self.lock_changed(self.root, tip, head):
@@ -138,6 +137,11 @@ or modify the runner or {self.hands_off}.
                             "fix dependencies there, then --resume")
         self.cleanup(n)
 
+    def finish(self, n, record, head):
+        """A ticket's terminal state: merged, or complete without commits and so nothing to integrate."""
+        self.update(record, status="done", head=head, drop=("reason",))
+        self.label(n, "agent-done", "in-progress")
+
     def cleanup(self, n):
         # Only merged work is removed: dirty worktrees stay, and -d refuses unmerged branches.
         # A failure never touches the ticket's done status; the next run tries again.
@@ -145,12 +149,12 @@ or modify the runner or {self.hands_off}.
         try:
             if wt.exists():
                 if dirty(wt):
-                    return say(f"#{n} merged, but {os.path.relpath(wt)} has uncommitted changes; left in place", YELLOW)
+                    return say(f"#{n} done, but {os.path.relpath(wt)} has uncommitted changes; left in place", YELLOW)
                 git(self.root, "worktree", "remove", "--force", str(wt))
             if not attempt(self.root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").returncode:
                 git(self.root, "branch", "-q", "-d", branch)
         except (subprocess.CalledProcessError, OSError) as exc:
-            say(f"#{n} merged, but removing its worktree/branch failed ({exc}); the next run retries", YELLOW)
+            say(f"#{n} done, but removing its worktree/branch failed ({exc}); the next run retries", YELLOW)
 
     def repair(self, n, record, tdir, tip, prompt):
         branch, wt = self.branch(n), Path(record["worktree"])

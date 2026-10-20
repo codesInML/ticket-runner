@@ -5,11 +5,12 @@ Every unblocked ticket runs in its own git worktree (.scratch/worktrees/<n>) on
 branch cc/<parent>/<n>, cut from the epic tip when it starts; up to --jobs run
 at once. Finished tickets integrate one at a time: rebase onto the epic tip,
 run the gate before every integration, fast-forward the epic branch, then remove the
-worktree and branch. A rebase conflict or gate failure resumes the ticket's own
-session once; if that does not fix it the ticket needs a human. A failed ticket
-holds back only the tickets that depend on it. Once every ticket has merged, the
-epic stages run in order, each skipped while its result still holds for the
-epic head (a new epic commit invalidates the stages after it):
+worktree and branch. A ticket that ends complete with no commits and a clean worktree
+has nothing to review or integrate, so it is done at once. A rebase conflict or gate
+failure resumes the ticket's own session once; if that does not fix it the ticket
+needs a human. A failed ticket holds back only the tickets that depend on it. Once
+every ticket has merged, the epic stages run in order, each skipped while its result
+still holds for the epic head (a new epic commit invalidates the stages after it):
   epic review  one or two reviewers (default deepseek and glm) each read the whole epic
                diff on their own and number their findings (D1, G1…) BLOCKING or DEFERRED.
                Two reviewers then cross-examine: each answers every one of the other's

@@ -85,9 +85,11 @@ verification tests also start a temporary server on localhost.
 
 The runner holds one checkout lock before reading saved state or discovering issues.
 Every ticket runs the configured gate before integration, including tickets whose
-base has not moved. Gates and verification commands must leave tracked code and
-HEAD unchanged; new unignored files created by verification commands are kept for
-inspection and require a human. Ignore intentional build artifacts in the project.
+base has not moved. A ticket that ends STATUS=COMPLETE with no commits and a clean
+worktree has nothing to integrate: it is done at once, without a ticket review or gate,
+and its worktree and branch are removed as after a merge. Gates and verification
+commands must leave tracked code and HEAD unchanged; new unignored files created by
+verification commands are kept for inspection and require a human. Ignore intentional build artifacts in the project.
 Runtime artifacts already present when the verifier starts may remain untracked in
 the disposable verification worktree. Ignore uploads, logs, and other app artifacts
 that checks can create later: newly appearing unignored files cannot be distinguished
