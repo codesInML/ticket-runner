@@ -102,6 +102,15 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
         text = self.run_agent(self.a.model, self.a.effort, self.a.max_turns, prompt, tdir, record,
                               session, cwd=wt, tag=f"#{n}", color=color)
         self.guard()
+        if record["status"] == "reported" and verdict(text) == "MISSING" and record.get("sessionId"):
+            # One nudge into the same session; its own folder keeps the full report in final.txt.
+            say(f"#{n} ended without a STATUS line; asking its session once for it", YELLOW)
+            nudge = """Your final message did not end with the required STATUS line. Change nothing; reply with
+exactly one line for the work as it stands: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKED.
+"""
+            text = self.run_agent(self.a.model, self.a.effort, self.a.max_turns, nudge, tdir / "status", record,
+                                  record["sessionId"], cwd=wt, tag=f"#{n}", color=color)
+            self.guard()
         if record["status"] == "budget-cap":
             return self.fail(n, record, "budget-cap", f"partial work kept in {os.path.relpath(wt)}; the budget ran "
                              "out, not the ticket: --resume continues it with a fresh budget")
