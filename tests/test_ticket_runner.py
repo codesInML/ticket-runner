@@ -177,7 +177,10 @@ if 'You are the repair reviewer' in prompt:
     fail = mode == 'repair-review-fail'
     done('## FINDINGS\\n' + ('- R1 BLOCKING fixed.txt:1 — wrong fix — cat fixed.txt' if fail else 'None.') + '\\n'
          + ('VERDICT=FAIL' if fail else 'VERDICT=PASS'), 'repair-review-session')
+if 'did not end with the required VERDICT line' in prompt:
+    done('VERDICT=PASS' if mode == 'review-missing-once' else 'Review complete.', resumed)
 if 'You are the ticket reviewer' in prompt:
+    if mode in ('review-missing', 'review-missing-once'): done('## BLOCKING\\nNone.\\n## DEFERRED\\nNone.', 'ticket-review-session')
     if mode == 'review-edit': Path('work.txt').write_text('reviewer edit')
     if mode == 'review-cap' and not resumed: done('', 'ticket-review-session', 'max_turns', 8)
     fail=mode == 'review-fail-always' or (mode == 'review-fail-once' and 'after one fix round' not in prompt)
@@ -348,7 +351,8 @@ sys.exit(8 if cap else 0)
              ('You are the repair reviewer', 'repair review'), ('You write the launch plan', 'launch plan'),
              ('You are an epic reviewer', 'epic review'), ('Cross-examination', 'cross'), ('Self-check for epic', 'cross'),
              ('You are the ticket writer', 'ticket writer'), ('Follow-up review for epic', 'follow-up'),
-             ('You are the ticket reviewer', 'ticket review'), ('did not end with the required STATUS', 'status nudge'))
+             ('You are the ticket reviewer', 'ticket review'), ('did not end with the required STATUS', 'status nudge'),
+             ('did not end with the required VERDICT', 'verdict nudge'))
 
     def kinds(self):
         return [next((kind for marker, kind in self.KINDS if marker in self.prompt(c)), 'implement')
@@ -605,6 +609,26 @@ sys.exit(8 if cap else 0)
         self.assertEqual(resumed[resumed.index('--resume')+1], 'ticket-review-session')
         self.assertEqual(self.model(resumed), self.model(self.calls()[1]))
         self.assertEqual(self.state()['209']['sessionId'], 'ticket-session')  # The implementer's session survives.
+
+    def test_osmani_missing_ticket_review_verdict_asks_the_session_once_then_proceeds(self):
+        self.plan_osmani()
+        result = self.run_osmani(mode='review-missing-once')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds()[:3], ['implement', 'ticket review', 'verdict nudge'])
+        nudge = self.calls()[2]
+        self.assertEqual(nudge[nudge.index('--resume')+1], 'ticket-review-session')
+        self.assertEqual(self.model(nudge), self.model(self.calls()[1]))
+        self.assertEqual(self.state()['209']['ticketReview']['status'], 'pass')
+        self.assertEqual(self.state()['209']['status'], 'done')
+        self.assertIn('## BLOCKING', (self.root / '.scratch/run-tickets-commandcode/207/209/review/round-1/final.txt').read_text())
+
+    def test_osmani_missing_ticket_review_verdict_twice_needs_a_human(self):
+        self.plan_osmani()
+        result = self.run_osmani(mode='review-missing')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.state()['209']['status'], 'needs-human')
+        self.assertIn('gave no verdict', self.state()['209']['reason'])
+        self.assertEqual(self.kinds(), ['implement', 'ticket review', 'verdict nudge'])
 
     def test_osmani_ticket_review_must_stay_read_only(self):
         self.plan_osmani()
