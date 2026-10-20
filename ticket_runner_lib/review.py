@@ -8,6 +8,8 @@ from .processes import dirty, git
 from .settings import BOLD, GREEN, RETRYABLE, YELLOW
 from .text import verdict
 
+VERDICT = r"VERDICT=(PASS|FAIL)"
+
 
 class Reviews:
     def reviewer_for(self, n):
@@ -34,13 +36,23 @@ class Reviews:
                                   self.review_prompt(n, tdir, base, round_), folder, rec, session, cwd=wt,
                                   tag=f"#{n} review", color=color, stage="ticket review")
             self.guard()
+            if rec["status"] == "reported" and verdict(text, VERDICT) == "MISSING" and rec.get("sessionId"):
+                # One nudge into the same session; its own folder keeps the full report in final.txt.
+                say(f"#{n} ticket review ended without a VERDICT line; asking its session once for it", YELLOW)
+                nudge = """Your final message did not end with the required VERDICT line. Change nothing; reply with
+exactly one line for your review as it stands: VERDICT=PASS when nothing is BLOCKING, otherwise VERDICT=FAIL.
+"""
+                text = self.run_agent(model, self.a.ticket_review_effort, self.a.ticket_review_max_turns, nudge,
+                                      folder / "verdict", rec, rec["sessionId"], cwd=wt, tag=f"#{n} review",
+                                      color=color, stage="ticket review")
+                self.guard()
             if dirty(wt) or git(wt, "rev-parse", "HEAD") != head or self.check_worktree(wt, branch):
                 return self.fail(n, record, "needs-human", f"the ticket review changed {os.path.relpath(wt)}, "
                                  "but it must be read-only; inspect the worktree, then --resume")
             if rec["status"] != "reported":
                 return self.fail(n, record, rec["status"], f"ticket review ended {rec['status']}; "
                                  f"--resume retries it (logs in {folder})")
-            result = verdict(text, r"VERDICT=(PASS|FAIL)")
+            result = verdict(text, VERDICT)
             self.update(rec, status=result.lower())
             if result == "PASS":
                 self.update(record, status="ready-to-merge", phase="integrate", drop=("reason",))
