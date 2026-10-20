@@ -241,6 +241,9 @@ if mode in ('parallel', 'parallel-conflict'):
             time.sleep(.02)
     commit('shared.txt' if mode == 'parallel-conflict' else 'ticket-' + number + '.txt', number)
     done('STATUS=COMPLETE', 'ticket-session')
+if mode in ('no-change', 'no-change-dirty') and Path.cwd().name == '209':
+    if mode == 'no-change-dirty': Path('work.txt').write_text('left uncommitted')
+    done('Closed the tracker issues.\\nSTATUS=COMPLETE', 'ticket-session')
 if os.environ.get('PROBE'):
     with open(os.environ['PROBE'], 'a') as f:
         f.write(json.dumps({'link': os.path.islink('local.cfg'), 'deps': os.path.exists('deps/lib.txt')}) + '\\n')
@@ -403,6 +406,37 @@ sys.exit(8 if cap else 0)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.state()['209']['status'], expected)
         self.assertEqual(len(self.calls()), 1)
+
+    def test_complete_ticket_without_commits_is_done_and_unblocks_its_dependents(self):
+        result = self.run_script(mode='no-change')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = self.state()
+        self.assertEqual((state['209']['status'], state['210']['status']), ('done', 'done'))
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'launch plan'])
+        self.assertIn(['issue', 'edit', '209', '--add-label', 'agent-done', '--remove-label', 'in-progress'],
+                      self.gh_calls())
+        self.assertIn(['issue', 'close', '209'], [c[:3] for c in self.gh_calls()])
+        self.assertFalse((self.root / '.scratch/worktrees/209').exists())
+        self.assertEqual(self.git('branch', '--list', 'cc/207/209'), '')
+        self.assertEqual(list((self.root / '.scratch/run-tickets-commandcode/207/209').glob('gate-*.log')), [])
+
+    def test_osmani_skips_the_ticket_review_of_a_ticket_without_commits(self):
+        self.plan_osmani()
+        result = self.run_osmani(mode='no-change')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds(), ['implement', 'implement', 'ticket review', 'epic review', 'epic review',
+                                        'cross', 'launch plan'])
+        self.assertNotIn('ticketReview', self.state()['209'])
+        self.assertIn('makes no\ncommit and still ends STATUS=COMPLETE', self.prompt(self.calls()[0]))
+
+    def test_complete_ticket_without_commits_but_a_dirty_worktree_needs_a_human(self):
+        result = self.run_script(mode='no-change-dirty')
+        self.assertEqual(result.returncode, 1)
+        record = self.state()['209']
+        self.assertEqual(record['status'], 'needs-human')
+        self.assertIn('commits=0, dirty=True', record['reason'])
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual((self.root / '.scratch/worktrees/209/work.txt').read_text(), 'left uncommitted')
 
     def test_missing_verdict_halts_downstream(self):
         self.check_failure('missing', 'needs-human')
