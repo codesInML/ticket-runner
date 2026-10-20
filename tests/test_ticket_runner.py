@@ -241,6 +241,8 @@ if mode in ('parallel', 'parallel-conflict'):
             time.sleep(.02)
     commit('shared.txt' if mode == 'parallel-conflict' else 'ticket-' + number + '.txt', number)
     done('STATUS=COMPLETE', 'ticket-session')
+if 'did not end with the required STATUS line' in prompt:
+    done('STATUS=COMPLETE' if mode == 'missing-once' else 'Still finishing up', resumed)
 if mode in ('no-change', 'no-change-dirty') and Path.cwd().name == '209':
     if mode == 'no-change-dirty': Path('work.txt').write_text('left uncommitted')
     done('Closed the tracker issues.\\nSTATUS=COMPLETE', 'ticket-session')
@@ -259,7 +261,7 @@ if mode == 'empty': sys.exit(0)
 if mode == 'error':
     print(json.dumps({'type':'result', 'subtype':'error', 'finalText':'STATUS=COMPLETE'}))
     sys.exit(6)
-text = 'Finished the work' if mode == 'missing' else 'STATUS=NEEDS_HUMAN' if mode == 'human' else 'STATUS=COMPLETE'
+text = 'Finished the work' if mode in ('missing', 'missing-once') else 'STATUS=NEEDS_HUMAN' if mode == 'human' else 'STATUS=COMPLETE'
 print(json.dumps({'type':'event', 'event':{'type':'tool_running'}}))
 print(json.dumps({'type':'result', 'subtype':'max_turns' if cap else 'success', 'sessionId':'ticket-session',
                   'finalText':text}))
@@ -346,7 +348,7 @@ sys.exit(8 if cap else 0)
              ('You are the repair reviewer', 'repair review'), ('You write the launch plan', 'launch plan'),
              ('You are an epic reviewer', 'epic review'), ('Cross-examination', 'cross'), ('Self-check for epic', 'cross'),
              ('You are the ticket writer', 'ticket writer'), ('Follow-up review for epic', 'follow-up'),
-             ('You are the ticket reviewer', 'ticket review'))
+             ('You are the ticket reviewer', 'ticket review'), ('did not end with the required STATUS', 'status nudge'))
 
     def kinds(self):
         return [next((kind for marker, kind in self.KINDS if marker in self.prompt(c)), 'implement')
@@ -438,8 +440,24 @@ sys.exit(8 if cap else 0)
         self.assertEqual(len(self.calls()), 1)
         self.assertEqual((self.root / '.scratch/worktrees/209/work.txt').read_text(), 'left uncommitted')
 
-    def test_missing_verdict_halts_downstream(self):
-        self.check_failure('missing', 'needs-human')
+    def test_missing_verdict_asks_the_session_once_then_proceeds(self):
+        result = self.run_script(mode='missing-once')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds(), ['implement', 'status nudge', 'implement', 'status nudge', 'epic review',
+                                        'epic review', 'cross', 'launch plan'])
+        nudge = self.calls()[1]
+        self.assertEqual(nudge[nudge.index('--resume')+1], 'ticket-session')
+        self.assertEqual((self.state()['209']['status'], self.state()['210']['status']), ('done', 'done'))
+        self.assertEqual((self.root / '.scratch/run-tickets-commandcode/207/209/final.txt').read_text(),
+                         'Finished the work')
+
+    def test_missing_verdict_twice_halts_downstream(self):
+        result = self.run_script(mode='missing')
+        self.assertEqual(result.returncode, 1)
+        record = self.state()['209']
+        self.assertEqual(record['status'], 'needs-human')
+        self.assertIn('status=MISSING', record['reason'])
+        self.assertEqual(self.kinds(), ['implement', 'status nudge'])
 
     def test_empty_output_halts_downstream(self):
         self.check_failure('empty', 'no-output')
