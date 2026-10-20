@@ -86,6 +86,21 @@ class ReviewInputTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertIsNotNone(review_rows(report + '\n' + line, ('BLOCKING', 'DEFERRED'))[1])
 
+    def test_findings_of_none_may_give_their_reason(self):
+        def parse(body):
+            return EpicReview().parse_findings(f'## FINDINGS\n\n{body}\n\nFOLLOW-UP=DONE', {'letter': 'G'},
+                                               r'FOLLOW-UP=(DONE)')
+        for body in ('None.', 'None. The only semantic change the fix diff makes is owned by fix ticket #51.',
+                     '**None** — the fixes stay within their tickets.', 'None\nThe fix diff touches three files.'):
+            with self.subTest(body=body):
+                self.assertEqual(parse(body), ({}, None))
+        for body in ('None of the fixes hold: runner.ts:88 still drops the timer.', 'The fix diff looks fine.'):
+            with self.subTest(body=body):
+                self.assertIn('shape', parse(body)[1])
+        found, problem = parse('None. Except:\n- G3 BLOCKING runner.ts:88 — drops the timer — evidence')
+        self.assertIsNone(problem)
+        self.assertEqual(['G3'], list(found))
+
     def test_repair_verdict_cannot_hide_blocking_findings(self):
         _, problem = EpicReview().parse_findings(
             '## FINDINGS\n- R1 BLOCKING fixed.py:1 — wrong — code evidence\nVERDICT=PASS',
