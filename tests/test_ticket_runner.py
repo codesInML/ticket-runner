@@ -186,8 +186,12 @@ if 'You are the ticket reviewer' in prompt:
     fail=mode == 'review-fail-always' or (mode == 'review-fail-once' and 'after one fix round' not in prompt)
     done('## BLOCKING\\n' + ('- a.ts:1 wrong' if fail else 'None.') + '\\n## DEFERRED\\n- old bug in b.ts:2\\n'
          + ('VERDICT=FAIL' if fail else 'VERDICT=PASS'), 'ticket-review-session')
+if 'did not end with the required end line' in prompt:
+    done(re.search(r'as it stands: ([A-Z_-]+=[A-Z_-]+)', prompt)[1] if mode.endswith('-once') else 'Report above.', resumed)
 if 'You are an epic reviewer' in prompt:
     letter = re.search(r'numbered ([A-Z])1', prompt)[1]
+    if mode in ('epic-missing', 'epic-missing-once') and letter == 'D':
+        done('## INTEGRATION\\nThe tickets fit.\\n## FINDINGS\\n- D1 DEFERRED b.ts:2 — old bug in b.ts:2 — seen in b.ts', 'epic-D')
     if mode == 'epic-cap' and letter == 'D' and not resumed: done('', 'epic-D', 'max_turns', 8)
     found = {'D': ['- D1 DEFERRED b.ts:2 — old bug in b.ts:2 — seen in b.ts']}.get(letter, [])
     if mode in ('fix', 'fix-not-fixed', 'fix-regression', 'fix-empty', 'dispute', 'writer-bad') and letter == 'D':
@@ -205,6 +209,7 @@ if 'Cross-examination' in prompt or 'Self-check for epic' in prompt:
     verb = 'DISPUTED' if mode == 'dispute' else 'WITHDRAWN' if mode == 'self-withdraw' else 'CONFIRMED'
     answers = [] if mode == 'cross-missing' else ['- %s %s a.ts:1 shows it' % (i, verb) for i in ids('exactly once:')]
     if mode == 'cross-empty': answers = ['- %s %s' % (i, verb) for i in ids('exactly once:')]
+    if mode == 'cross-end-missing-once': done('## ANSWERS\\n' + '\\n'.join(answers) + '\\n## WITHDRAWN\\nNone.', resumed or 'check-session')
     done('## ANSWERS\\n' + '\\n'.join(answers) + '\\n## WITHDRAWN\\nNone.\\nCHECK=DONE', resumed or 'check-session')
 if 'You are the ticket writer' in prompt:
     drafts = Path(re.search(r'its own file (\\S+)/NN-short-slug.md', prompt)[1])
@@ -352,7 +357,8 @@ sys.exit(8 if cap else 0)
              ('You are an epic reviewer', 'epic review'), ('Cross-examination', 'cross'), ('Self-check for epic', 'cross'),
              ('You are the ticket writer', 'ticket writer'), ('Follow-up review for epic', 'follow-up'),
              ('You are the ticket reviewer', 'ticket review'), ('did not end with the required STATUS', 'status nudge'),
-             ('did not end with the required VERDICT', 'verdict nudge'))
+             ('did not end with the required VERDICT', 'verdict nudge'),
+             ('did not end with the required end line', 'end-line nudge'))
 
     def kinds(self):
         return [next((kind for marker, kind in self.KINDS if marker in self.prompt(c)), 'implement')
@@ -1464,6 +1470,32 @@ sys.exit(8 if cap else 0)
                 self.assertEqual(self.state()['_review']['status'], 'needs-human')
                 self.assertIn(expected, self.state()['_review']['reason'])
                 self.assertFalse(self.created_issues())
+
+    def test_epic_reviewer_without_its_end_line_is_asked_once_then_proceeds(self):
+        result = self.run_script(mode='epic-missing-once')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds()[-5:], ['epic review', 'epic review', 'end-line nudge', 'cross', 'launch plan'])
+        nudge = self.call('end-line nudge')
+        self.assertEqual(nudge[nudge.index('--resume')+1], 'epic-D')
+        self.assertIn('VERDICT=SHIP when nothing is BLOCKING', self.prompt(nudge))
+        self.assertEqual(self.state()['_review']['status'], 'ship')
+        self.assertIn('D1 DEFERRED', (self.root / '.scratch/run-tickets-commandcode/207/review/d-deepseek/review/final.txt').read_text())
+
+    def test_epic_reviewer_missing_its_end_line_twice_needs_a_human(self):
+        result = self.run_script(mode='epic-missing')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.state()['_review']['status'], 'needs-human')
+        self.assertIn('does not end with VERDICT=', self.state()['_review']['reason'])
+        self.assertEqual(self.kinds().count('end-line nudge'), 1)
+
+    def test_cross_examination_without_its_end_line_is_asked_once(self):
+        result = self.run_script(mode='cross-end-missing-once')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        nudge = self.call('end-line nudge')
+        cross = self.call('cross')
+        self.assertEqual(nudge[nudge.index('--resume')+1], cross[cross.index('--resume')+1])
+        self.assertIn('as it stands: CHECK=DONE.', self.prompt(nudge))
+        self.assertEqual(self.state()['_review']['findings']['D1']['outcome'], 'confirmed')
 
     def test_interrupted_epic_reviewer_resumes_its_own_session(self):
         self.assertEqual(self.run_script(mode='epic-cap').returncode, 1)
