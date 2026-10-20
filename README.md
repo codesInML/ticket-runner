@@ -89,8 +89,8 @@ whose base has not moved. A ticket that ends STATUS=COMPLETE with no commits and
 worktree has nothing to integrate: it is done at once, without a ticket review or gate,
 and its worktree and branch are removed as after a merge. An implement session whose
 final report lacks the STATUS line is resumed once and asked for only that line; a
-second miss needs a human. A ticket review that ends without its VERDICT line gets the
-same single nudge. Gates and verification commands must leave tracked code and
+second miss needs a human. A ticket review that ends without its VERDICT line, and an
+epic reviewer or ticket writer whose report lacks its end line, get the same single nudge. Gates and verification commands must leave tracked code and
 HEAD unchanged; new unignored files created by verification commands are kept for
 inspection and require a human. Ignore intentional build artifacts in the project.
 Runtime artifacts already present when the verifier starts may remain untracked in

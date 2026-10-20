@@ -19,6 +19,12 @@ from .text import empty, review_rows, section, verdict
 FINDING = ("BLOCKING", "DEFERRED")
 STEPS = {"review": "independent review", "check": "cross-examination", "tickets": "fix ticket drafts",
          "follow": "follow-up review", "follow-check": "follow-up cross-examination"}
+# The line each step's report must end with, and how a nudge asks for it.
+ENDS = {"review": (r"VERDICT=(SHIP|FIX-FIRST)", "VERDICT=SHIP when nothing is BLOCKING, otherwise VERDICT=FIX-FIRST"),
+        "check": (r"CHECK=(DONE)", "CHECK=DONE"), "follow-check": (r"CHECK=(DONE)", "CHECK=DONE"),
+        "tickets": (r"STATUS=(COMPLETE|NEEDS_HUMAN|BLOCKED)",
+                    "STATUS=COMPLETE, or STATUS=NEEDS_HUMAN when a fix needs a human decision"),
+        "follow": (r"FOLLOW-UP=(DONE)", "FOLLOW-UP=DONE")}
 
 
 def reviewer_name(model):
@@ -129,7 +135,8 @@ class EpicReview:
     def run_reviewers(self, rv, todo, step, prompt):
         """One session turn for each reviewer in `todo`, all at once: the finished ones' texts by full model ID.
 
-        None when the main worktree changed; an unfinished session is left in rv["stopped"] for stopped().
+        A report without the step's end line gets one nudge into its session. None when the main worktree
+        changed; an unfinished session is left in rv["stopped"] for stopped().
         """
         a, head = self.a, git(self.root, "rev-parse", "HEAD")
         self.update(rv, status="in-progress", drop=("reason",))
@@ -148,6 +155,24 @@ class EpicReview:
             BOLD, BLUE)
         texts = self.parallel(jobs)
         self.guard()
+        end, line = ENDS[step]
+        missing = [i for i, r in enumerate(todo) if r["status"] == "reported" and r.get("sessionId")
+                   and verdict(texts[i], end) == "MISSING"]
+        if missing:
+            say(f"{' and '.join(todo[i]['name'] for i in missing)} ended the {STEPS[step]} without its end line; "
+                "asking once for it", YELLOW)
+            nudge = f"""Your final message did not end with the required end line. Change nothing; reply with
+exactly one line for your report as it stands: {line}.
+"""
+            jobs = [lambda r=todo[i]: self.run_agent(
+                r["model"], a.epic_review_effort, a.epic_review_max_turns, nudge,
+                self.review_dir() / r["dir"] / step / "verdict", r, r["sessionId"],
+                tag=f"epic review · {r['name']}", color=self.stage_color(rv["reviewers"].index(r)),
+                stage="epic review") for i in missing]
+            for i, reply in zip(missing, self.parallel(jobs)):
+                # The steps parse the whole report, so only the reply's line joins it.
+                texts[i] = f"{texts[i].rstrip()}\n{reply.strip().splitlines()[-1]}" if reply.strip() else texts[i]
+            self.guard()
         if dirty(self.root) or git(self.root, "rev-parse", "HEAD") != head:
             self.epic_fail(rv, "needs-human", "an epic reviewer changed the main worktree, but the review must be "
                            "read-only; inspect it, then --epic-only")
@@ -199,7 +224,7 @@ class EpicReview:
                 return 1
             problems = []
             for r in (r for r in todo if r["model"] in texts):
-                found, problem = self.parse_findings(texts[r["model"]], r, r"VERDICT=(SHIP|FIX-FIRST)")
+                found, problem = self.parse_findings(texts[r["model"]], r, ENDS["review"][0])
                 if problem:
                     problems.append(f"{r['name']}: {problem}")
                     continue
@@ -240,7 +265,7 @@ class EpicReview:
                 if problem:
                     problems.append(f"{r['name']}: {problem}")
                     continue
-                if verdict(text, r"CHECK=(DONE)") == "MISSING":
+                if verdict(text, ENDS[step][0]) == "MISSING":
                     problems.append(f"{r['name']}: its report does not end with CHECK=DONE")
                     continue
                 if sorted(i for i, _, _ in answers) != sorted(want):
@@ -285,7 +310,8 @@ class EpicReview:
                                    lambda r: self.ticket_writer_prompt(rv, drafts, rv.get("asked")))
         if texts is None or self.stopped(rv):
             return 1
-        status, report = verdict(texts[writer["model"]]), self.review_dir() / writer["dir"] / "tickets" / "final.txt"
+        status = verdict(texts[writer["model"]], ENDS["tickets"][0])
+        report = self.review_dir() / writer["dir"] / "tickets" / "final.txt"
         if status == "NEEDS_HUMAN":
             self.update(rv, asked=True)
             return self.epic_fail(rv, "needs-human", f"the ticket writer needs a decision; see {report}. Answer on "
@@ -449,7 +475,7 @@ class EpicReview:
             for r in (r for r in todo if r["model"] in texts):
                 text = texts[r["model"]]
                 fixes, fix_problem = review_rows(section(text, "FIXES"), ("NOT FIXED", "FIXED"))
-                found, problem = self.parse_findings(text, r, r"FOLLOW-UP=(DONE)")
+                found, problem = self.parse_findings(text, r, ENDS["follow"][0])
                 problem = problem or fix_problem
                 if not problem and sorted(i for i, _, _ in fixes) != wanted:
                     problem = f"it must mark each of {', '.join(wanted)} FIXED or NOT FIXED exactly once"
