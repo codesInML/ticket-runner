@@ -8,7 +8,7 @@ import subprocess
 import threading
 
 from .agents import AgentProcesses
-from .backends import ClaudeCode, CommandCode
+from .backends import ClaudeCode, Codex, CommandCode
 from .display import say
 from .epic_review import EpicReview
 from .github import gh_json
@@ -16,7 +16,8 @@ from .processes import attempt, dirty, git, save
 from .prompts import Prompts
 from .review import Reviews
 from .scheduling import Scheduling
-from .settings import BOLD, CLAUDE_CONFIG_DIR, CLAUDE_PROTECTED, CONFIG, Fatal, GREEN, TICKET_COLORS, YELLOW
+from .settings import (BOLD, CLAUDE_CONFIG_DIR, CLAUDE_PROTECTED, CODEX_HOME_DIR, CODEX_PROTECTED, CONFIG,
+                       Fatal, GREEN, TICKET_COLORS, YELLOW)
 from .shipping import Shipping
 from .text import section
 from .tickets import TicketImplementation
@@ -39,8 +40,10 @@ class Runner(
         self.worktrees = root / ".scratch" / "worktrees"
         # The backend holds the company key for its children's environment only; it is never stored or shown.
         self.claude = getattr(a, "backend", "commandcode") == "claude-api"
-        self.backend = ClaudeCode(key, root / CLAUDE_CONFIG_DIR) if self.claude else CommandCode()
-        if self.claude:
+        factories = {"commandcode": CommandCode, "claude-api": lambda: ClaudeCode(key, root / CLAUDE_CONFIG_DIR),
+                     "codex": lambda: Codex(root / CODEX_HOME_DIR, a.codex_auth, a.codex_binary)}
+        self.backend = factories[getattr(a, "backend", "commandcode")]()
+        if hasattr(self.backend, "prepare"):
             self.backend.prepare(skills_dir)
         self.binary = self.backend.binary
         self.budgets, self.spent = getattr(a, "budgets", {}), False
@@ -54,16 +57,20 @@ class Runner(
         self.costs()  # migrate legacy costs before any replaceable stage records are reset
         home = Path(__file__).resolve().parents[1]
         project = ["AGENTS.md", CONFIG, *cfg["linkFiles"], *([cfg["serveEnv"]] if cfg["serveEnv"] else []),
-                   *(CLAUDE_PROTECTED if self.claude else ())]
+                   *(CLAUDE_PROTECTED if self.claude else ()),
+                   *(CODEX_PROTECTED if self.backend.name == "codex" else ())]
         project = list(dict.fromkeys(project))
         # Under .claude/ only tracked files are watched: it may hold untracked worktrees and local settings
         # that the operator's own sessions keep changing while the runner works.
         claude_dir = attempt(root, "ls-files", "-z", "--", ".claude").stdout.split("\0") if self.claude else []
         protected = [home / "ticket_runner.py", home / "bin/ticket-runner", home / "bin/ticket-runner-osmani",
-                     home / "bin/ticket-runner-claude", *sorted((home / "ticket_runner_lib").glob("*.py")),
+                     home / "bin/ticket-runner-claude", home / "bin/ticket-runner-codex",
+                     *sorted((home / "ticket_runner_lib").glob("*.py")),
                      *(root / f for f in project if not f.endswith("/") and not f.startswith(":(glob)")), *(root / f for f in claude_dir if f)]
         # A protected file that is missing now must stay missing: an agent creating one counts as changing it.
         self.instruction_paths = self.claude_instructions() if self.claude else set()
+        if self.backend.name == "codex":
+            self.instruction_paths = self.codex_instructions()
         self.snapshots = {p: p.read_bytes() if p.exists() else None for p in [*protected, *self.instruction_paths]}
         self.protected = list(dict.fromkeys([*project, *(str(p.relative_to(root)) for p in protected
                                                        if p.is_relative_to(root)
@@ -120,10 +127,32 @@ class Runner(
         changed = [p for p, contents in self.snapshots.items() if (p.read_bytes() if p.exists() else None) != contents]
         if self.claude:
             changed.extend(sorted(self.claude_instructions() - self.instruction_paths))
+        if self.backend.name == "codex":
+            changed.extend(sorted(self.codex_instructions() - self.instruction_paths))
         if changed:
             raise Fatal(f"Agent modified {', '.join(map(str, changed))}; inspect and restore before resuming")
         if git(self.root, "branch", "--show-current") != self.epic:
             raise Fatal(f"Main worktree left {self.epic}; check it out again, then --resume")
+
+    def codex_instructions(self, root=None):
+        root = Path(root or self.root)
+        found = {root / "AGENTS.md", root / "AGENTS.override.md"}
+        excluded = {root / name for name in (".git", ".scratch", *self.cfg["dependencyDirs"])}
+        for folder, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if Path(folder) / d not in excluded]
+            inside = Path(folder).relative_to(root).parts
+            found.update(Path(folder) / name for name in files if name in ("AGENTS.md", "AGENTS.override.md")
+                         or inside and inside[0] in (".codex", ".agents"))
+        return found
+
+    def codex_snapshot(self, root):
+        return {p: p.read_bytes() if p.exists() else None for p in self.codex_instructions(root)}
+
+    def guard_codex(self, root, snapshots):
+        changed = {p for p, contents in snapshots.items() if (p.read_bytes() if p.exists() else None) != contents}
+        changed.update(self.codex_instructions(root) - snapshots.keys())
+        if changed:
+            raise Fatal(f"Agent modified {', '.join(map(str, sorted(changed)))}; inspect and restore before resuming")
 
     def check_main(self):
         if git(self.root, "branch", "--show-current") != self.epic:

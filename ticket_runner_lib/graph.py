@@ -51,7 +51,7 @@ def render_graph(levels, tickets, kinds, labels=None, spent=None):
     counts = [f"{sum(k == kind for k in kinds.values())} {kind}" for kind in KINDS
               if any(k == kind for k in kinds.values())]
     lines = [paint("Ticket graph: ", BOLD) + " · ".join(counts)
-             + (paint(f" · {dollars(spent)} spent", DIM) if spent is not None else "")]
+             + (paint(f" · {spent if isinstance(spent, str) else dollars(spent)} spent", DIM) if spent is not None else "")]
     for i, level in enumerate(levels, 1):
         wave = f"  wave {i:<2} "
         if all(kinds[n] == "done" for n in level):

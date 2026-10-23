@@ -1,5 +1,5 @@
-"""Parallel GitHub ticket implementation, then epic review, verify and ship stages, via CommandCode or
-Claude Code.
+"""Parallel GitHub ticket implementation, then epic review, verify and ship stages, via CommandCode,
+Claude Code or Codex.
 
 Every unblocked ticket runs in its own git worktree (.scratch/worktrees/<n>) on
 branch cc/<parent>/<n>, cut from the epic tip when it starts; up to --jobs run
@@ -51,6 +51,8 @@ A backend is the agent CLI and account of every session in the run, independent 
                runner's own, never a personal subscription (docs/adr/0002-*). Every stage must
                name a Claude model; CLAUDE.md, CLAUDE.local.md and .claude/ join the protected paths; each
                session's cost is recorded.
+  codex        Codex CLI on the operator's ChatGPT subscription, with an isolated CODEX_HOME.
+               Every stage names a gpt-* model; costs record tokens and time only.
 """
 
 from pathlib import Path
@@ -64,14 +66,14 @@ import signal
 import subprocess
 import sys
 
-from .backends import company_key
+from .backends import codex_auth, company_key, strip_codex_auth
 from .config import load_config, plan_problems, plan_stages, skill_problems, stage_refusals, stage_skills
 from .display import dollars, paint, say
 from .github import discover, gh_json
 from .graph import classify, render_graph
 from .processes import attempt, command, dirty
 from .runner import Runner
-from .settings import (BACKENDS, BOLD, BUDGETS, CLAUDE_DEFAULTS, CLAUDE_EFFORTS, CLAUDE_MODELS, COMMANDCODE_DEFAULTS, DIM, EFFORTS,
+from .settings import (BACKENDS, BACKEND_DEFAULTS, BACKEND_EFFORTS, BACKEND_MODELS, BOLD, BUDGETS, DIM, EFFORTS,
                        KEYCHAIN_SERVICE, LAUNCH_PLAN_MODELS, MODELS, OSMANI_SOURCE, RED, WORKFLOWS, YELLOW)
 
 
@@ -101,6 +103,15 @@ and --resume continues it with a fresh budget. The ticket graph shows the epic's
 --post-costs puts it on the tickets' done comments and the epic issue, never the pull request.
 Ticket review (osmani only) alternates by ticket number over --ticket-review-model:
 even tickets get the first model, odd tickets the second; a re-review keeps its model.
+
+Model aliases (codex): luna (gpt-6-luna), sol (gpt-6.1-sol); full gpt-* IDs also work.
+Defaults: luna @ high implements, reviews tickets and verifies; one sol @ high reviews the
+epic and re-checks its own findings; luna @ low writes the launch plan. The same-model
+ticket-review warning is intentional. Login: codex login (ChatGPT subscription, never an API key).
+The runner uses .scratch/codex-home with a symlink to the operator's auth.json and its own
+config. Completed tool items count toward the turn cap; --resume continues the same thread
+with a fresh cap. Usage limits and signed-out logins stop every ticket; request failures
+are retryable provider-error. No dollar costs or *_MAX_BUDGET_USD caps apply on codex.
 
 Examples:
   ticket-runner 207 --dry-run
@@ -137,7 +148,8 @@ Project config (.agents/ticket-runner.json, optional JSON; every key optional):
   gate            ["npx tsc --noEmit", "npm test"]   run before every ticket integration
   prBase, mergeMethod, verify, serve, ready, readyTimeout, serveEnv, browser
 The config, AGENTS.md, linkFiles and serveEnv (on claude-api also CLAUDE.md and the tracked
-files under .claude/) are protected: an agent changing one stops the run, and a ticket whose
+files under .claude/; on codex also AGENTS.md and AGENTS.override.md at every depth, .codex/
+and .agents/) are protected: an agent changing one stops the run, and a ticket whose
 diff touches one is not integrated. AGENTS.md may carry a `## Ticket Runner`
 section naming the project's personal data, governed parameters, public contracts and
 performance-sensitive areas; the prompts point agents at it.
@@ -158,10 +170,10 @@ Sub-tickets are the parent's native GitHub sub-issues plus any issue naming the 
 in a "## Parent" section or a "Parent…: #N" line. Blockers are the union of native
 "blocked by" links, a "## Blocked by" section, and labelled "Blocked by:" lines;
 prose that just says "blocked by" counts for nothing.
-State/logs: .scratch/run-tickets-commandcode/<parent>/ on either backend (state.json holds each
-            attempt's cost; costs.md the table --post-costs posts)
+State/logs: .scratch/run-tickets-commandcode/<parent>/ on every backend (state.json holds each
+            attempt's spend; costs.md the table --post-costs posts)
 Worktrees:  .scratch/worktrees/<n> on branch cc/<parent>/<n>
-Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, TICKET_RUNNER_ANTHROPIC_API_KEY,
+Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_ANTHROPIC_API_KEY,
      TICKET_RUNNER_KEYCHAIN_SERVICE, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (default
      ~/.agents/skills), IMPL_MODEL, IMPL_EFFORT, IMPL_MAX_TURNS, IMPL_JOBS,
      VERIFY_MODEL, VERIFY_EFFORT, VERIFY_MAX_TURNS (the verifier),
@@ -177,7 +189,7 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, TICKET_RUNNER_ANTHROPIC_API_KEY,
                    help="skills the prompts follow (default: the epic's saved workflow, else pocock)")
     p.add_argument("--backend", default=os.getenv("BACKEND") or None,
                    help="agent CLI and account of every session in the run: commandcode (default), or claude-api "
-                   "(Claude Code on the company Anthropic API key)")
+                   "(Claude Code on the company Anthropic API key), or codex (ChatGPT subscription)")
     p.add_argument("--model", default=os.getenv("IMPL_MODEL"),
                    help="implementation model (default flash; sonnet on claude-api)")
     p.add_argument("--effort", default=os.getenv("IMPL_EFFORT"),
@@ -232,8 +244,8 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, TICKET_RUNNER_ANTHROPIC_API_KEY,
         p.error(f"--backend must be one of {', '.join(BACKENDS)}")
     # Defaults belong to the backend: a flag or env var always wins over them.
     claude = a.backend == "claude-api"
-    aliases = CLAUDE_MODELS if claude else MODELS
-    for prefix, defaults in (CLAUDE_DEFAULTS if claude else COMMANDCODE_DEFAULTS).items():
+    aliases = BACKEND_MODELS[a.backend]
+    for prefix, defaults in BACKEND_DEFAULTS[a.backend].items():
         for field, value in zip(("model", "effort"), defaults):
             if getattr(a, prefix + field) is None:
                 setattr(a, prefix + field, value)
@@ -242,7 +254,7 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, TICKET_RUNNER_ANTHROPIC_API_KEY,
     if not 1 <= len(a.epic_review_models) <= 2 or len(set(a.epic_review_models)) < len(a.epic_review_models):
         p.error("--epic-review-model needs one or two different models")
     a.verify_model = aliases.get(a.verify_model, a.verify_model)
-    if not claude and a.launch_plan_model not in LAUNCH_PLAN_MODELS:
+    if a.backend == "commandcode" and a.launch_plan_model not in LAUNCH_PLAN_MODELS:
         p.error(f"--launch-plan-model must be one of {', '.join(LAUNCH_PLAN_MODELS)}")
     a.launch_plan_model = aliases.get(a.launch_plan_model, a.launch_plan_model)
     a.ticket_review_models = [aliases.get(m, m) for m in a.ticket_review_model.replace(" ", "").split(",") if m]
@@ -264,7 +276,7 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, TICKET_RUNNER_ANTHROPIC_API_KEY,
     for model, effort in [(a.model, a.effort), (a.verify_model, a.verify_effort), (a.launch_plan_model, a.launch_plan_effort),
                           *((m, a.epic_review_effort) for m in a.epic_review_models),
                           *((m, a.ticket_review_effort) for m in a.ticket_review_models)]:
-        allowed = EFFORTS.get(model) or (CLAUDE_EFFORTS if claude and model.startswith("claude-") else None)
+        allowed = EFFORTS.get(model) or BACKEND_EFFORTS[a.backend]
         if allowed and effort != "none" and effort not in allowed:
             p.error(f"{model} effort must be one of {sorted(allowed)}, or none")
     return a
@@ -280,7 +292,19 @@ def stage_models(a):
 
 
 def backend_refusals(a, key):
-    """claude-api runs only on Claude models, the claude binary and the company key: proven before any spend."""
+    """Prove the run-wide model and account boundary before any spend, including on a dry run."""
+    if a.backend == "codex":
+        refusals = [f"{stage} model {model} is not a gpt-* model; codex runs every stage on the Codex CLI"
+                    for stage, model, _, _ in stage_models(a) if not re.fullmatch(r"gpt-[a-z0-9][a-z0-9.-]*", model)]
+        if not shutil.which(a.codex_binary):
+            refusals.append("Codex binary not found; install it or set CODEX_BIN")
+        try:
+            auth = json.loads(a.codex_auth.read_text())
+        except (OSError, ValueError):
+            auth = None
+        if not isinstance(auth, dict) or auth.get("auth_mode") != "chatgpt":
+            refusals.append(f"ChatGPT login required at {a.codex_auth}: run `codex login`, then --resume")
+        return refusals
     refusals = [f"{stage} model {model} is not a Claude model, and claude-api runs every stage on Claude Code"
                 for stage, model, _, _ in stage_models(a) if not re.fullmatch(r"claude-[a-z0-9][a-z0-9.-]*", model)]
     if not shutil.which(os.getenv("CLAUDE_BIN", "claude")):
@@ -295,6 +319,8 @@ def backend_refusals(a, key):
 def plan_models(a, source):
     """The backend and each stage's model for --dry-run; never the key itself, only where it came from."""
     head = f"Backend: {a.backend}" + (f", company key from {source or 'nowhere'}" if a.backend == "claude-api" else "")
+    if a.backend == "codex":
+        head += f", ChatGPT login from {a.codex_auth}"
     lines, seen = [paint(head, BOLD)], set()
     for stage, model, effort, turns in stage_models(a):
         if stage == "ticket review" and a.workflow != "osmani":
@@ -323,6 +349,9 @@ def epic_base(a):
 
 def main():
     a = parse_args()
+    if a.backend == "codex":
+        a.codex_auth, a.codex_binary = codex_auth(), os.getenv("CODEX_BIN", "codex")
+        strip_codex_auth()
     # Capture before any git/GitHub/install child; even other backends must not inherit the override.
     override = os.environ.pop("TICKET_RUNNER_ANTHROPIC_API_KEY", "").strip()
     a.company_credentials = ((override, "env") if override else company_key()) if a.backend == "claude-api" else (None, None)
@@ -399,7 +428,7 @@ def run_checkout(a, root, folder):
                 f"/tmp/agent-skills && git -C /tmp/agent-skills sparse-checkout set references && "
                 f"cp -R /tmp/agent-skills/references {skills_dir.parent}/"] if missing else []
     refusals += stage_refusals(a, cfg, root)
-    if claude:
+    if a.backend != "commandcode":
         refusals += backend_refusals(a, key)
     if osmani:
         if not a.epic_only:
@@ -423,7 +452,7 @@ def run_checkout(a, root, folder):
         return 1 if refusals else 0
     if refusals:
         raise RuntimeError("; ".join(refusals))
-    if not claude and not shutil.which(os.getenv("COMMANDCODE_BIN", "command-code")):
+    if a.backend == "commandcode" and not shutil.which(os.getenv("COMMANDCODE_BIN", "command-code")):
         raise RuntimeError("CommandCode binary not found; set COMMANDCODE_BIN")
     branch = command("git", "branch", "--show-current")
     if not branch:

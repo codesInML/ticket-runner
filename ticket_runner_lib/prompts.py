@@ -104,7 +104,7 @@ Read-only: do not edit files, commit, change branches, push, or post comments; s
 
     def agent_rule(self, work="agent work"):
         """Which agent CLI a session may use for sub-agents: its own backend, never another."""
-        if self.claude:
+        if self.backend.name != "commandcode":
             return (f"Use only your own tools and sub-agents for {work}; do not invoke the codex, claude or "
                     "command-code CLIs.\n")
         return f"Use only CommandCode for {work}; do not invoke codex or claude CLIs.\n"

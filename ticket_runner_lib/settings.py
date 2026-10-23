@@ -27,8 +27,12 @@ EFFORTS = {
 }
 WORKFLOWS = ("pocock", "osmani")
 # The agent CLI and account of a whole run (docs/adr/0002-*): CommandCode, or Claude Code billed to a
-# company Anthropic API key.
-BACKENDS = ("commandcode", "claude-api")
+# company Anthropic API key, or Codex on the operator's ChatGPT subscription.
+BACKENDS = ("commandcode", "claude-api", "codex")
+CODEX_MODELS = {"luna": "gpt-6-luna", "sol": "gpt-6.1-sol"}
+CODEX_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+EFFORTS.update({CODEX_MODELS["luna"]: CODEX_EFFORTS,
+                CODEX_MODELS["sol"]: CODEX_EFFORTS | {"ultra"}})
 CLAUDE_MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5", "haiku": "claude-haiku-5-5"}
 CLAUDE_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 EFFORTS.update({m: CLAUDE_EFFORTS for m in CLAUDE_MODELS.values()})
@@ -51,6 +55,20 @@ CLAUDE_SETTINGS = {"attribution": {"commit": "", "pr": ""}, "autoMemoryEnabled":
 # Claude Code reads these, so on claude-api an agent changing one changes what later sessions are told.
 CLAUDE_PROTECTED = ("CLAUDE.md", ".claude/", "CLAUDE.local.md",
                     ":(glob)**/CLAUDE.md", ":(glob)**/CLAUDE.local.md")
+CODEX_HOME_DIR = ".scratch/codex-home"
+CODEX_PROTECTED = (":(glob)**/AGENTS.md", "AGENTS.override.md", ":(glob)**/AGENTS.override.md", ".codex/", ".agents/")
+CODEX_CONFIG = '''model_provider = "openai"
+forced_login_method = "chatgpt"
+cli_auth_credentials_store = "file"
+notify = []
+[features]
+memories = false
+[memories]
+generate_memories = false
+use_memories = false
+[history]
+persistence = "none"
+'''
 # Osmani skills the runner names in its prompts. Each links ../../references/*.md, which the
 # skills installer leaves out; the preflight refuses to run while any of those files is missing.
 # Skills each stage's prompts name.
@@ -73,6 +91,11 @@ COMMANDCODE_DEFAULTS = {"": ("flash", None), "ticket_review_": ("luna,glm", "hig
                         "epic_review_": (EPIC_REVIEWERS, "high"), "launch_plan_": ("deepseek", "high")}
 CLAUDE_DEFAULTS = {"": ("sonnet", "medium"), "ticket_review_": ("opus", "medium"), "verify_": ("sonnet", "medium"),
                    "epic_review_": ("opus", "high"), "launch_plan_": ("haiku", "low")}
+CODEX_DEFAULTS = {"": ("luna", "high"), "ticket_review_": ("luna", "high"), "verify_": ("luna", "high"),
+                  "epic_review_": ("sol", "high"), "launch_plan_": ("luna", "low")}
+BACKEND_DEFAULTS = {"commandcode": COMMANDCODE_DEFAULTS, "claude-api": CLAUDE_DEFAULTS, "codex": CODEX_DEFAULTS}
+BACKEND_MODELS = {"commandcode": MODELS, "claude-api": CLAUDE_MODELS, "codex": CODEX_MODELS}
+BACKEND_EFFORTS = {"commandcode": None, "claude-api": CLAUDE_EFFORTS, "codex": CODEX_EFFORTS}
 # Bumped whenever the shape of a saved epic review changes; an older record is reviewed again.
 REVIEW_PROTOCOL = 3
 FIX_LABEL = "epic-review-fix"
@@ -126,8 +149,8 @@ TICKET_COLORS = tuple(f"38;5;{n}" for n in (213, 121, 141, 180, 159, 168, 147, 1
     if COLOR256 else ("34", "94", "93", "92", "95", "91", "97")
 # CommandCode's tool names, then Claude Code's.
 FILE_TOOLS = {"read_file", "edit_file", "write_file"}
-WRITE_TOOLS = {"edit_file", "write_file", "Edit", "Write", "MultiEdit", "NotebookEdit"}
-SHELL_TOOLS = {"shell_command", "Bash"}
+WRITE_TOOLS = {"edit_file", "write_file", "Edit", "Write", "MultiEdit", "NotebookEdit", "file_change"}
+SHELL_TOOLS = {"shell_command", "Bash", "command_execution"}
 PRINT = threading.Lock()
 
 

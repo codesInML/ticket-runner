@@ -1,7 +1,7 @@
 """Each backend's agent CLI: its argv and environment, its event stream, and how a session ended.
 
 run_agent owns the process, interrupts and records; an adapter only translates. Narration events are
-CommandCode-shaped on both backends, so the colour feed looks the same whichever CLI runs.
+CommandCode-shaped on every backend, so the colour feed looks the same whichever CLI runs.
 """
 
 from pathlib import Path
@@ -9,12 +9,157 @@ import json
 import os
 import re
 import subprocess
+import time
 
-from .settings import BROWSER_MCP, BROWSER_TOOLS, CLAUDE_SETTINGS, FOREIGN_AUTH, KEYCHAIN_SERVICE
+from .settings import BROWSER_MCP, BROWSER_TOOLS, CLAUDE_SETTINGS, CODEX_CONFIG, FOREIGN_AUTH, Fatal, KEYCHAIN_SERVICE
 
 
 def number(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
+def codex_auth():
+    return Path(os.getenv("CODEX_HOME") or str(Path.home() / ".codex")).expanduser().absolute() / "auth.json"
+
+
+def strip_codex_auth():
+    # Capture CODEX_HOME before calling this; no gate, install or GitHub child should inherit credentials.
+    for key in list(os.environ):
+        if key.startswith(("OPENAI_", "CODEX_")):
+            os.environ.pop(key)
+
+
+class Codex:
+    name = "codex"
+
+    def __init__(self, home, auth=None, binary=None):
+        self.binary = binary or os.getenv("CODEX_BIN", "codex")
+        self.home, self.auth = home, auth or codex_auth()
+
+    def prepare(self, skills_dir):
+        self.home.mkdir(parents=True, exist_ok=True)
+        auth = self.home / "auth.json"
+        if auth.is_symlink():
+            if auth.resolve() != self.auth.resolve():
+                auth.unlink()
+        elif auth.exists():
+            raise Fatal(f"Refusing to overwrite {auth}: expected a symlink to the operator's auth.json")
+        if not auth.is_symlink():
+            auth.symlink_to(self.auth)
+        (self.home / "config.toml").write_text(CODEX_CONFIG)
+        # Codex discovers ~/.agents/skills itself; an explicit skills directory needs its legacy home link.
+        skills = self.home / "skills"
+        if skills.is_symlink():
+            skills.unlink()
+        if skills_dir.resolve() != (Path.home() / ".agents/skills").resolve():
+            if skills.exists():
+                raise Fatal(f"Refusing to overwrite {skills}: expected a skills symlink")
+            skills.symlink_to(skills_dir, target_is_directory=True)
+
+    def argv(self, model, effort, turns, prompt, session=None, cwd=None, budget=None, browser=False):
+        argv = [self.binary, "exec", *(["resume"] if session else []), "--json", "--strict-config",
+                "--dangerously-bypass-approvals-and-sandbox", "-m", model]
+        if effort and effort != "none":
+            argv.extend(["-c", f'model_reasoning_effort="{effort}"'])
+        if browser:
+            for name, server in BROWSER_MCP["mcpServers"].items():
+                for key, value in server.items():
+                    argv.extend(["-c", f"mcp_servers.{name}.{key}={json.dumps(value)}"])
+        return [*argv, *([session] if session else []), prompt]
+
+    def env(self):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("OPENAI_", "CODEX_"))}
+        return {**env, "CODEX_HOME": str(self.home)}
+
+    def stream(self, turns=500):
+        return CodexStream(turns)
+
+
+class CodexStream:
+    """exec JSONL; usage is cumulative across a thread, including after resume."""
+
+    TOOL_ITEMS = {"command_execution", "file_change", "mcp_tool_call", "collab_tool_call", "web_search"}
+    USAGE_CODES = {"usage_limit_reached", "workspace_owner_usage_limit_reached", "workspace_member_usage_limit_reached",
+                   "workspace_owner_credits_depleted", "workspace_member_credits_depleted"}
+    AUTH_CODES = {"refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated", "unauthorized",
+                  "authentication_error", "not_authenticated"}
+    USAGE_WORDING = re.compile(r"\bYou[’']ve hit your usage limit\b|\bYour workspace is out of credits\b|"
+                               r"\bYou hit your spend cap set\b", re.I)
+    AUTH_WORDING = re.compile(r"\bYour access token could not be refreshed\b|"
+                              r"\bplan type is required for chatgpt authentication\b|"
+                              r"\b(?:Missing bearer or basic authentication|Not logged in|ChatGPT login is required)\b|"
+                              r"\bPlease (?:log in|sign in) (?:to|again)\b|\b401 Unauthorized\b", re.I)
+
+    def __init__(self, turns=500):
+        self.cap, self.completed, self.stop_at_cap = turns, set(), False
+        self.text, self.usage, self.errors = "", {}, []
+        self.finished, self.failed, self.turns = False, False, 0
+        self.started = time.monotonic()
+
+    def feed(self, frame):
+        kind, events = frame.get("type"), []
+        if kind == "thread.started":
+            return frame.get("thread_id"), []
+        if kind == "turn.started":
+            self.turns += 1
+            events.append({"type": "turn_start", "turnNumber": self.turns})
+        elif kind == "turn.completed":
+            self.finished = True
+            raw = frame.get("usage") or {}
+            self.usage = {name: number(raw.get(key)) for key, name in (
+                ("input_tokens", "inputTokens"), ("cached_input_tokens", "cacheReadInputTokens"),
+                ("output_tokens", "outputTokens"))}
+        elif kind in {"error", "turn.failed"}:
+            error = frame.get("error", {k: v for k, v in frame.items() if k != "type"})
+            error = error if isinstance(error, dict) else {"message": str(error)}
+            self.errors.append(error)
+            self.failed = self.failed or kind == "turn.failed"
+            events.append({"type": "run_error", "error": error.get("message", "")})
+        elif kind in {"item.started", "item.completed"}:
+            item = frame.get("item") or {}
+            tool = item.get("type")
+            if kind == "item.completed" and tool == "agent_message":
+                self.text = str(item.get("text") or "")
+                events.append({"type": "message_end", "content": [{"type": "text", "text": self.text}]})
+            elif tool in self.TOOL_ITEMS:
+                name = f"mcp__{item.get('server')}__{item.get('tool')}" if tool == "mcp_tool_call" else tool
+                if kind == "item.started" or tool == "file_change":
+                    events.append({"type": "tool_queued", "toolName": name,
+                                   "input": {"command": item.get("command")} if tool == "command_execution" else item})
+                if kind == "item.completed":
+                    self.completed.add(item.get("id"))
+                    self.stop_at_cap = len(self.completed) >= self.cap
+                    if item.get("status") in {"failed", "declined"} or item.get("exit_code") not in (None, 0):
+                        events.append({"type": "tool_errored", "toolName": name,
+                                       "error": item.get("error") or item.get("aggregated_output", "")})
+        return None, events
+
+    def outcome(self, rc):
+        spent = {"usage": self.usage, "numTurns": len(self.completed),
+                 "durationMs": int((time.monotonic() - self.started) * 1000)}
+        if self.stop_at_cap:
+            return "turn-cap", self.text, spent, None
+        if self.finished and not self.failed and rc == 0:
+            return ("reported" if self.text.strip() else "no-output"), self.text, spent, None
+        fatal = self.account_failure()
+        return ("provider-error" if self.failed or self.errors else "no-output"), self.text, spent, fatal
+
+    def account_failure(self):
+        # Only CLI errors are eligible; agent messages and tool output often discuss limits in the project.
+        for error in reversed(self.errors):
+            code = error.get("code") or error.get("type")
+            status = error.get("http_status_code") or error.get("status")
+            message = str(error.get("message") or "")
+            usage, auth = code in self.USAGE_CODES, code in self.AUTH_CODES or status == 401
+            if not code and not status:
+                usage, auth = bool(self.USAGE_WORDING.search(message)), bool(self.AUTH_WORDING.search(message))
+            if usage:
+                reset = error.get("resets_at")
+                detail = f" Reset time: {reset}." if reset is not None else f" {message}" if message else ""
+                return f"ChatGPT usage limit was reached.{detail} Wait for access to reset, then --resume"
+            if auth:
+                return "ChatGPT login expired or signed out: run `codex login`, then --resume"
+        return None
 
 
 class CommandCode:
@@ -37,7 +182,7 @@ class CommandCode:
     def env(self):
         return None
 
-    def stream(self):
+    def stream(self, turns=500):
         return CommandCodeStream()
 
 
@@ -118,7 +263,7 @@ class ClaudeCode:
                    CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")
         return env
 
-    def stream(self):
+    def stream(self, turns=500):
         return ClaudeStream()
 
 

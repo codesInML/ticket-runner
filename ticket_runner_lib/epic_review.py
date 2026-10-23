@@ -537,7 +537,7 @@ exactly one line for your report as it stands: {line}.
         for n in self.order:
             if n in closed or self.tickets[n]["state"] == "CLOSED":
                 continue
-            spent = [c["costUsd"] for owner, c in self.costs() if owner == f"#{n}"]
+            spent = [c["costUsd"] for owner, c in self.costs() if owner == f"#{n}" and "costUsd" in c]
             cost = f" Cost: {dollars(sum(spent))} (estimated)." \
                 if spent and getattr(self.a, "post_costs", False) else ""
             result = subprocess.run(["gh", "issue", "close", str(n), "--comment",

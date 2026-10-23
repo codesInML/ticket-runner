@@ -2,7 +2,8 @@
 
 Run `bin/ticket-runner --help` for workflow, configuration, and resume options.
 `bin/ticket-runner-osmani` selects the Osmani workflow, and `bin/ticket-runner-claude` the
-claude-api backend; the two compose (`ticket-runner-claude 207 --workflow osmani`). Every
+claude-api backend. `bin/ticket-runner-codex` selects the codex backend on a ChatGPT subscription.
+The backend wrappers compose with `--workflow osmani`. Every
 command uses the `ticket_runner.py` entry point and requires the adjacent `ticket_runner_lib`
 package.
 
@@ -14,6 +15,49 @@ A backend is the agent CLI and account of every session in a run (`--backend`, e
 - `claude-api`: Claude Code (`CLAUDE_BIN`, default `claude`) on a config directory of the runner's
   own (`.scratch/claude-config`), billed to the company Anthropic API key and never to a personal
   subscription. See `docs/adr/0002-*` for why.
+- `codex`: the Codex CLI (`CODEX_BIN`, default `codex`) billed to the operator's ChatGPT subscription.
+
+### Codex on a ChatGPT subscription
+
+Run `codex login` first. Preflight, including `--dry-run`, refuses unless the operator's
+`$CODEX_HOME/auth.json` (default `~/.codex/auth.json`) reports `auth_mode: "chatgpt"`, the binary exists,
+and every stage names a `gpt-*` model. No API key is used. Before spawning children the runner removes
+inherited `OPENAI_*` and `CODEX_*` variables; only sessions receive the runner-owned `CODEX_HOME` at
+`<project root>/.scratch/codex-home`. Gates, installs and GitHub commands receive none of them.
+
+The runner writes its own config, with memories and prompt history off, no notifications or configured
+MCP servers, and no inherited model or effort. Its `auth.json` is a symlink to the operator's file so
+rotating refresh tokens stay shared. A regular file at that destination is refused. Skills load from
+`~/.agents/skills`; an explicit `AGENT_SKILLS_DIR` is linked into the runner home. Session transcripts
+remain there for `--resume`. Browser verification receives Chrome DevTools configuration inline.
+
+| Stage | Default model | Effort |
+| --- | --- | --- |
+| Implement, fix, integration repair, verify repair | `gpt-6-luna` | high |
+| Ticket review (osmani) | `gpt-6-luna` | high |
+| Epic review, repair review | `gpt-6.1-sol` | high |
+| Verify | `gpt-6-luna` | high |
+| Launch plan | `gpt-6-luna` | low |
+
+Aliases `luna` and `sol`, or full `gpt-*` IDs, work for every stage; flags and environment variables
+override defaults. Luna accepts low/medium/high/xhigh/max; Sol also accepts ultra. The epic review has
+one reviewer that re-checks its own findings. The default ticket review intentionally shares the
+implementer's model in a fresh session; the yellow warning keeps those shared blind spots visible.
+
+The runner counts completed tool items and terminates the process group at the stage's turn cap.
+The resulting `turn-cap` is retryable: `--resume` continues the same thread with a fresh count.
+A ChatGPT usage limit stops every ticket and reports the reset time when available; wait for access,
+then `--resume`. Signed-out or expired/revoked logins stop the run with `codex login`, then `--resume`.
+Request rate limits, overloads and server errors leave only that session retryable as `provider-error`.
+
+Costs are tokens and time only, with no dollar amount in state, the graph or the tables posted with
+`--post-costs`. Budget variables ending in `_MAX_BUDGET_USD` are ignored. Input, cached input and output
+tokens are saved; displayed totals add input and output (cached input is already included in input).
+Resumed thread totals subtract usage already recorded. `AGENTS.md` and `AGENTS.override.md` at every
+depth, `.codex/` and `.agents/` join the protected paths: main-worktree changes stop the run, and ticket
+diffs touching them never integrate. Saved-backend rules also apply to codex. See `docs/adr/0003-*`.
+
+### Claude Code on the company API key
 
 The key comes from `TICKET_RUNNER_ANTHROPIC_API_KEY`, else the macOS Keychain item
 `krim-anthropic-api-key` (`TICKET_RUNNER_KEYCHAIN_SERVICE` names another). Store it once with
