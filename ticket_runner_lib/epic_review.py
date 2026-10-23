@@ -273,9 +273,13 @@ exactly one line for your report as it stands: {line}.
                     continue
                 own = {i for i, f in rv["findings"].items() if f["by"] == r["model"] and f["round"] == round_}
                 withdrawn, problem = review_rows(section(text, "WITHDRAWN"), ("WITHDRAWN",)) if pair else ([], None)
-                if problem or any(i not in own for i, _, _ in withdrawn):
-                    problems.append(f"{r['name']}: {problem or 'withdrawal must identify its own finding'}")
+                if problem:
+                    problems.append(f"{r['name']}: {problem}")
                     continue
+                stray = [i for i, _, _ in withdrawn if i not in own]
+                if stray:  # Only a reviewer's own findings from this round can be withdrawn; the rest change nothing.
+                    say(f"Epic review: ignoring {r['name']}'s withdrawal of {', '.join(stray)}, not its own finding "
+                        "in this round", YELLOW, err=True)
                 with self.state:
                     for i, verb, evidence in answers:
                         rv["findings"][i].update(outcome={"CONFIRMED": "confirmed", "DISPUTED": "disputed",

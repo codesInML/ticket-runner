@@ -210,6 +210,9 @@ if 'Cross-examination' in prompt or 'Self-check for epic' in prompt:
     answers = [] if mode == 'cross-missing' else ['- %s %s a.ts:1 shows it' % (i, verb) for i in ids('exactly once:')]
     if mode == 'cross-empty': answers = ['- %s %s' % (i, verb) for i in ids('exactly once:')]
     if mode == 'cross-end-missing-once': done('## ANSWERS\\n' + '\\n'.join(answers) + '\\n## WITHDRAWN\\nNone.', resumed or 'check-session')
+    if mode == 'stray-withdraw':
+        done('## ANSWERS\\n' + '\\n'.join(answers) + '\\n## WITHDRAWN\\n- D1 WITHDRAWN the fix verdict, not the finding\\nCHECK=DONE',
+             resumed or 'check-session')
     done('## ANSWERS\\n' + '\\n'.join(answers) + '\\n## WITHDRAWN\\nNone.\\nCHECK=DONE', resumed or 'check-session')
 if 'You are the ticket writer' in prompt:
     drafts = Path(re.search(r'its own file (\\S+)/NN-short-slug.md', prompt)[1])
@@ -1447,6 +1450,13 @@ sys.exit(8 if cap else 0)
         self.assertIn('Self-check for epic #207', self.prompt(check))
         self.assertEqual(check[check.index('--resume')+1], 'epic-G')
         self.assertEqual(self.state()['_review']['findings']['G1']['outcome'], 'withdrawn')
+
+    def test_a_withdrawal_of_another_reviewers_finding_is_ignored(self):
+        result = self.run_script(mode='stray-withdraw')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ignoring glm's withdrawal of D1", result.stderr)
+        d1 = self.state()['_review']['findings']['D1']
+        self.assertEqual((d1['outcome'], d1.get('withdrawn')), ('confirmed', None))
 
     def test_epic_reviewers_are_one_or_two_different_models(self):
         for models in ('flash,deepseek', 'flash,glm,luna', ''):

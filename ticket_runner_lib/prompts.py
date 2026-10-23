@@ -138,6 +138,8 @@ only when the epic touches auth, untrusted input or personal or sensitive data, 
 BLOCKING is a real correctness or security defect in this epic, a broken integration between tickets, or
 an UNMET requirement or checkpoint. DEFERRED is a real defect the epic does not own: pre-existing code, or
 out of the epic's scope. Style and taste are not findings. Write "None." when there are none.
+After this review says SHIP the runner closes the sub-issues and opens the pull request, and a person
+reviews and merges it, so open sub-issues, a missing pull request or a pending human review are never findings.
 Put nothing else under FINDINGS: any summary belongs in the sections above.
 {self.read_only}End with exactly one line: VERDICT=SHIP when nothing is BLOCKING, otherwise VERDICT=FIX-FIRST.
 """
@@ -208,6 +210,8 @@ Review only the fix diff: git diff {rv['start']}..{rv['fixHead']} and git log {r
 far is at {self.folder / 'review' / 'report.md'}.
 ## FIXES: each of these confirmed findings exactly once: - {targets[0]} FIXED <evidence>, or - {targets[0]} NOT FIXED <evidence>.
 IDs: {', '.join(targets)}
+The steps that follow SHIP (closing the sub-issues, opening, reviewing and merging the pull request) never make a
+finding NOT FIXED.
 ## FINDINGS: only problems the fix diff itself introduced, numbered on from {r['letter']}{max(used, default=0) + 1}, in the
 same shape as before: BLOCKING for a defect the fixes caused, DEFERRED for anything else you notice.
 Anything outside the fix diff is out of scope. Write "None." when there are none.
