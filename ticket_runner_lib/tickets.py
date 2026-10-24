@@ -1,5 +1,6 @@
 """Ticket implementation and per-ticket lifecycle."""
 
+from pathlib import Path
 import os
 
 from .display import say
@@ -19,7 +20,9 @@ class TicketImplementation:
             tdir.mkdir(parents=True, exist_ok=True)
             (tdir / "ticket.md").write_text(f"# #{n} — {self.tickets[n]['title']}\n\n{self.tickets[n]['body']}")
             phase = record.get("phase") if self.a.resume else None
-            if phase not in ("review", "fix", "integrate"):
+            if phase == "escalate":
+                self.resume_escalation(n, record, tdir)
+            elif phase not in ("review", "fix", "integrate"):
                 self.implement(n, record, tdir)
             if self.osmani and (record.get("status") == "ready-to-review" or phase in ("review", "fix")):
                 self.review_ticket(n, record, tdir)
@@ -83,7 +86,7 @@ class TicketImplementation:
 Read the full ticket at {tdir / 'ticket.md'}. Satisfy its acceptance criteria without expanding scope.
 Use TDD at appropriate seams; decide and document seams yourself in this unattended run.
 Run typechecking, targeted tests, the full suite once, and the workflow's code review before finishing.
-"""
+{self.verification_rule()}"""
         prompt += self.agent_rule("any agent/review work")
         prompt += f"""You are in a dedicated git worktree for this ticket. Other tickets of this epic run in parallel in
 their own worktrees; the runner integrates them, so ignore them.
@@ -121,19 +124,93 @@ exactly one line for the work as it stands: STATUS=COMPLETE, STATUS=NEEDS_HUMAN,
         commits = int(git(wt, "rev-list", "--count", f"{base}..HEAD"))
         problem = self.check_worktree(wt, branch)
         complete = status == "COMPLETE" and not dirty(wt) and not problem
-        if complete and not commits:
-            with self.integration:
-                self.finish(n, record, git(self.root, "rev-parse", "HEAD"))
-                say(f"#{n} complete with no commits; nothing to review or integrate", GREEN, BOLD)
-                self.cleanup(n)
-        elif complete and self.osmani:
-            self.update(record, status="ready-to-review", phase="review", drop=("reason",))
-            say(f"#{n} implemented ({commits} commit{'s' * (commits != 1)}); handing to ticket review", BOLD, color)
-        elif complete:
-            self.update(record, status="ready-to-merge", phase="integrate", drop=("reason",))
-            say(f"#{n} implemented ({commits} commit{'s' * (commits != 1)}); waiting to integrate", BOLD, color)
+        if complete:
+            self.implemented(n, record)
+        elif not problem and self.can_escalate(record, "implement"):
+            why = f"its implementer ({self.a.model}) ended status={status}" + (", with uncommitted changes" if dirty(wt) else "")
+            reports = [tdir / "final.txt", *([tdir / "status" / "final.txt"] if (tdir / "status").is_dir() else [])]
+            if self.escalate(n, record, tdir, "implement", why, reports):
+                self.escalated(n, record, tdir, "implement")
         elif status == "NEEDS_HUMAN" and not dirty(wt) and not problem:
             self.fail(n, record, "awaiting-human", f"agent needs a decision; see {tdir / 'final.txt'}")
         else:
             self.fail(n, record, "needs-human", problem or f"status={status}, commits={commits}, "
                       f"dirty={dirty(wt)}; see {tdir}")
+
+    def implemented(self, n, record):
+        """A complete ticket moves on: to ticket review (osmani), to integration, or straight to done without commits."""
+        wt, color = Path(record["worktree"]), self.color(n)
+        commits = int(git(wt, "rev-list", "--count", f"{record['base']}..HEAD"))
+        if not commits:
+            with self.integration:
+                self.finish(n, record, git(self.root, "rev-parse", "HEAD"))
+                say(f"#{n} complete with no commits; nothing to review or integrate", GREEN, BOLD)
+                self.cleanup(n)
+        elif self.osmani:
+            self.update(record, status="ready-to-review", phase="review", drop=("reason",))
+            say(f"#{n} implemented ({commits} commit{'s' * (commits != 1)}); handing to ticket review", BOLD, color)
+        else:
+            self.update(record, status="ready-to-merge", phase="integrate", drop=("reason",))
+            say(f"#{n} implemented ({commits} commit{'s' * (commits != 1)}); waiting to integrate", BOLD, color)
+
+    def can_escalate(self, record, kind):
+        """Each kind of stuck (implement, review) escalates once per ticket, and only when a model is set."""
+        return bool(self.a.escalate_model) and kind not in record.get("escalation", {})
+
+    def escalate(self, n, record, tdir, kind, why, reports, **review):
+        """One session on the escalation model before a stuck ticket reaches a human; True when it completes."""
+        branch, wt, color, model = self.branch(n), Path(record["worktree"]), self.color(n), self.a.escalate_model
+        answered = record.get("status") == "awaiting-human"
+        with self.state:
+            rec = record.setdefault("escalation", {}).setdefault(kind, {})
+        head = git(wt, "rev-parse", "HEAD")
+        session = rec.get("sessionId") if self.a.resume and (rec.get("status") in RETRYABLE or answered) \
+            and rec.get("head") == head else None
+        self.update(rec, why=why, reports=[str(r) for r in reports], **review, drop=() if session else ("sessionId",))
+        self.update(record, status="in-progress", phase="escalate", escalating=kind)
+        say(f"\n━━ #{n}: {why}; {'resuming' if session else 'escalating to'} {model} ━━", BOLD, color)
+        prompt = self.escalate_prompt(n, tdir, branch, record["base"], kind, why, reports)
+        if answered:
+            prompt += (f"\nYou stopped earlier to ask a human. Read their answer in the latest comments of "
+                       f"gh issue view {n} --comments, then continue.\n")
+        folder = tdir / "escalate" / kind
+        text = self.run_agent(model, self.a.escalate_effort, self.a.escalate_max_turns, prompt, folder, rec, session,
+                              cwd=wt, tag=f"#{n} escalate", color=color, stage="escalate")
+        self.guard()
+        if rec["status"] != "reported":
+            self.fail(n, record, rec["status"], f"escalation to {model} ended {rec['status']}; partial work kept in "
+                      f"{os.path.relpath(wt)}; --resume continues it")
+            return False
+        status = verdict(text)
+        problem = "uncommitted changes remain" if dirty(wt) else self.check_worktree(wt, branch)
+        if status == "NEEDS_HUMAN" and not problem:
+            self.fail(n, record, "awaiting-human", f"{model} needs a decision; see {folder / 'final.txt'}")
+            return False
+        if status != "COMPLETE" or problem:
+            self.fail(n, record, "needs-human", f"escalation to {model} ended status={status}"
+                      f"{'; ' + problem if problem else ''}; see {folder}")
+            return False
+        say(f"#{n} {model} unblocked it", GREEN, BOLD)
+        return True
+
+    def escalated(self, n, record, tdir, kind):
+        """After an escalation (or a person's fix in its worktree): back to the stage it left."""
+        self.update(record, drop=("escalating", "reason"))
+        if kind == "implement":
+            return self.implemented(n, record)
+        esc = record["escalation"]["review"]
+        with self.state:
+            rec = record.setdefault("ticketReview", {})
+        self.update(rec, round=esc["nextRound"], previousReport=esc["previousReport"],
+                    fixReport=str(tdir / "escalate" / "review" / "final.txt"), drop=("sessionId",))
+        self.update(record, status="ready-to-review", phase="review")
+
+    def resume_escalation(self, n, record, tdir):
+        kind = record.get("escalating", "implement")
+        rec = record.get("escalation", {}).get(kind, {})
+        if record.get("status") == "needs-human":
+            return self.escalated(n, record, tdir, kind)  # a person finished it in the worktree
+        extra = {k: rec[k] for k in ("nextRound", "previousReport") if k in rec}
+        if self.escalate(n, record, tdir, kind, rec.get("why", "an earlier escalation was interrupted"),
+                         [Path(p) for p in rec.get("reports", [])], **extra):
+            self.escalated(n, record, tdir, kind)

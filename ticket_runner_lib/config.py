@@ -48,12 +48,15 @@ def load_config(root):
              "serveEnv": (lambda v: v is None or relative(v), "a relative path or null"),
              "browser": (lambda v: type(v) is bool, "true or false"),
              "prBase": (lambda v: v is None or text(v), "a branch name or null"),
-             "mergeMethod": (lambda v: v in MERGE_METHODS, f"one of {', '.join(MERGE_METHODS)}")}
+             "mergeMethod": (lambda v: v in MERGE_METHODS, f"one of {', '.join(MERGE_METHODS)}"),
+             "appVerification": (lambda v: v is None or relative(v), "a relative path or null")}
     problems = [f"{key} must be {what}" for key, (ok, what) in rules.items() if not ok(cfg[key])]
     if not problems and cfg["serve"] and not cfg["ready"]:
         problems.append("serve needs a ready command to poll")
     if not problems and cfg["browser"] and not cfg["serve"]:
         problems.append("browser needs serve: the verifier can only browse a running app")
+    if not problems and cfg["appVerification"] and not (root / cfg["appVerification"]).is_file():
+        problems.append(f"appVerification {cfg['appVerification']} does not exist")
     if problems:
         raise RuntimeError(f"{CONFIG}: " + "; ".join(problems))
     return cfg

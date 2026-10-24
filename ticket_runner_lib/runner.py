@@ -57,6 +57,7 @@ class Runner(
         self.costs()  # migrate legacy costs before any replaceable stage records are reset
         home = Path(__file__).resolve().parents[1]
         project = ["AGENTS.md", CONFIG, *cfg["linkFiles"], *([cfg["serveEnv"]] if cfg["serveEnv"] else []),
+                   *([cfg["appVerification"]] if cfg["appVerification"] else []),
                    *(CLAUDE_PROTECTED if self.claude else ()),
                    *(CODEX_PROTECTED if self.backend.name == "codex" else ())]
         project = list(dict.fromkeys(project))

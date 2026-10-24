@@ -1,6 +1,24 @@
 # Ticket runner
 
 Run `bin/ticket-runner --help` for workflow, configuration, and resume options.
+
+## Escalation and self-verification
+
+A ticket is stuck when its implementer ends NEEDS_HUMAN, BLOCKED or without a STATUS line, when its fix
+round does, or when its ticket review still blocks after the fix round. Before it goes to a person, the
+runner hands it once per kind (implement, review) to the escalation model (`--escalate-model`, env
+`ESCALATE_MODEL`, default `sol` @ xhigh on codex and `opus` @ high on claude-api, `off` on commandcode). That
+session runs in a fresh thread in the ticket's worktree with the earlier reports. It is told to fix the
+problem, run the checks itself, and stop only for a decision that belongs to a person. A review escalation
+is followed by one more review round with the same reviewer; a ticket still blocking after that needs a
+human. An escalation that ends NEEDS_HUMAN waits on the issue (`awaiting-human`) as before, and an
+interrupted one resumes its own thread with `--resume`.
+
+Every implement, fix and escalation prompt tells the session to run the ticket's Verification checks
+itself, manual checks included, on the platform each one names. It also tells the session to report them
+under `## VERIFICATION`. Set `appVerification` in `.agents/ticket-runner.json` to a doc saying how to run
+the app (devices, scripts, test data) and every working prompt, and the verifier, points at it. The doc is
+protected like the config, and ticket worktrees see it only if it is committed or listed in `linkFiles`.
 `bin/ticket-runner-osmani` selects the Osmani workflow, and `bin/ticket-runner-claude` the
 claude-api backend. `bin/ticket-runner-codex` selects the codex backend on a ChatGPT subscription.
 The backend wrappers compose with `--workflow osmani`. Every
@@ -38,6 +56,7 @@ remain there for `--resume`. Browser verification receives Chrome DevTools confi
 | Epic review, repair review | `gpt-6.1-sol` | high |
 | Verify | `gpt-6-luna` | high |
 | Launch plan | `gpt-6-luna` | low |
+| Escalate (a stuck ticket) | `gpt-6.1-sol` | xhigh |
 
 Aliases `luna` and `sol`, or full `gpt-*` IDs, work for every stage; flags and environment variables
 override defaults. Luna accepts low/medium/high/xhigh/max; Sol also accepts ultra. The epic review has

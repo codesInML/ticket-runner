@@ -114,7 +114,7 @@ class Scheduling:
         labels = {n: self.data.get(str(n), {}).get("status") for n in stuck}
         for n in self.threads:
             phase = self.data.get(str(n), {}).get("phase")
-            labels[n] = {"integrate": "merging", "review": "reviewing", "fix": "fixing"}.get(phase, "implementing")
+            labels[n] = {"integrate": "merging", "review": "reviewing", "fix": "fixing", "escalate": "escalating"}.get(phase, "implementing")
         labels.update({n: "needs " + " ".join(map(ref, unmet)) for n, unmet in self.deferred.items()})
         skipped = set(self.order) - set(self.selected) - done
         kinds = classify(self.blockers, done, self.threads, stuck, self.deferred, skipped)

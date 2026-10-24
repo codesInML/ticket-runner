@@ -41,6 +41,9 @@ A workflow names the skills each prompt follows:
           implementer's session, then a re-review by the same model; DEFERRED findings
           are carried into the epic review. The ticket writer follows
           planning-and-task-breakdown.
+A stuck ticket (an implementer or fix round ending NEEDS_HUMAN, BLOCKED or without STATUS, or a ticket
+review still blocking after the fix round) goes once per kind to --escalate-model in a fresh session in
+its worktree before it needs a human; a review escalation gets one more review round.
 In both workflows the epic review follows code-review-and-quality, the verify repair follows
 debugging-and-error-recovery, the launch plan follows shipping-and-launch, and the verifier
 uses browser-testing-with-devtools when the project config turns the browser on.
@@ -146,6 +149,7 @@ Project config (.agents/ticket-runner.json, optional JSON; every key optional):
   dependencyDirs  ["node_modules"]    cloned copy-on-write into each worktree
   linkFiles       [".env"]            symlinked into each worktree
   gate            ["npx tsc --noEmit", "npm test"]   run before every ticket integration
+  appVerification null                how to run the app for manual checks; named in every working prompt
   prBase, mergeMethod, verify, serve, ready, readyTimeout, serveEnv, browser
 The config, AGENTS.md, linkFiles and serveEnv (on claude-api also CLAUDE.md and the tracked
 files under .claude/; on codex also AGENTS.md and AGENTS.override.md at every depth, .codex/
@@ -180,7 +184,8 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
      TICKET_REVIEW_MODEL, TICKET_REVIEW_EFFORT, TICKET_REVIEW_MAX_TURNS,
      EPIC_REVIEW_MODEL, EPIC_REVIEW_EFFORT, EPIC_REVIEW_MAX_TURNS,
      LAUNCH_PLAN_MODEL, LAUNCH_PLAN_EFFORT, LAUNCH_PLAN_MAX_TURNS,
-     IMPL_, TICKET_REVIEW_, EPIC_REVIEW_, VERIFY_ and LAUNCH_PLAN_MAX_BUDGET_USD (claude-api
+     ESCALATE_MODEL ('off' disables), ESCALATE_EFFORT, ESCALATE_MAX_TURNS,
+     IMPL_, TICKET_REVIEW_, EPIC_REVIEW_, VERIFY_, LAUNCH_PLAN_ and ESCALATE_MAX_BUDGET_USD (claude-api
      only: a dollar cap on each session of that stage),
      GATE_CMDS and INSTALL_CMD (override the config's gate and install).
 """)
@@ -218,6 +223,11 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
                    "haiku on claude-api)")
     p.add_argument("--launch-plan-effort", default=os.getenv("LAUNCH_PLAN_EFFORT"))
     p.add_argument("--launch-plan-max-turns", type=positive, default=os.getenv("LAUNCH_PLAN_MAX_TURNS", "500"))
+    p.add_argument("--escalate-model", default=os.getenv("ESCALATE_MODEL"),
+                   help="model that takes over a stuck ticket before it needs a human, or 'off' (default sol on "
+                   "codex, opus on claude-api, off on commandcode)")
+    p.add_argument("--escalate-effort", default=os.getenv("ESCALATE_EFFORT"))
+    p.add_argument("--escalate-max-turns", type=positive, default=os.getenv("ESCALATE_MAX_TURNS", "500"))
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--only", type=positive)
@@ -254,6 +264,7 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
     if not 1 <= len(a.epic_review_models) <= 2 or len(set(a.epic_review_models)) < len(a.epic_review_models):
         p.error("--epic-review-model needs one or two different models")
     a.verify_model = aliases.get(a.verify_model, a.verify_model)
+    a.escalate_model = None if a.escalate_model == "off" else aliases.get(a.escalate_model, a.escalate_model)
     if a.backend == "commandcode" and a.launch_plan_model not in LAUNCH_PLAN_MODELS:
         p.error(f"--launch-plan-model must be one of {', '.join(LAUNCH_PLAN_MODELS)}")
     a.launch_plan_model = aliases.get(a.launch_plan_model, a.launch_plan_model)
@@ -274,6 +285,7 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
                 p.error(f"{env} must be a positive amount of US dollars")
             a.budgets[stage] = value
     for model, effort in [(a.model, a.effort), (a.verify_model, a.verify_effort), (a.launch_plan_model, a.launch_plan_effort),
+                          *([(a.escalate_model, a.escalate_effort)] if a.escalate_model else []),
                           *((m, a.epic_review_effort) for m in a.epic_review_models),
                           *((m, a.ticket_review_effort) for m in a.ticket_review_models)]:
         allowed = EFFORTS.get(model) or BACKEND_EFFORTS[a.backend]
@@ -288,7 +300,8 @@ def stage_models(a):
             *(("ticket review", m, a.ticket_review_effort, a.ticket_review_max_turns) for m in a.ticket_review_models),
             *(("epic review", m, a.epic_review_effort, a.epic_review_max_turns) for m in a.epic_review_models),
             ("verify", a.verify_model, a.verify_effort, a.verify_max_turns),
-            ("launch plan", a.launch_plan_model, a.launch_plan_effort, a.launch_plan_max_turns)]
+            ("launch plan", a.launch_plan_model, a.launch_plan_effort, a.launch_plan_max_turns),
+            *([("escalate", a.escalate_model, a.escalate_effort, a.escalate_max_turns)] if a.escalate_model else [])]
 
 
 def backend_refusals(a, key):

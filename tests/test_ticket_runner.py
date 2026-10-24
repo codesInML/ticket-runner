@@ -177,13 +177,19 @@ if 'You are the repair reviewer' in prompt:
     fail = mode == 'repair-review-fail'
     done('## FINDINGS\\n' + ('- R1 BLOCKING fixed.txt:1 — wrong fix — cat fixed.txt' if fail else 'None.') + '\\n'
          + ('VERDICT=FAIL' if fail else 'VERDICT=PASS'), 'repair-review-session')
+if 'You are taking over issue' in prompt:
+    if mode == 'escalate-cap' and not resumed: done('', 'escalate-session', 'max_turns', 8)
+    if mode == 'escalate-human': done('STATUS=NEEDS_HUMAN', 'escalate-session')
+    commit('escalated-' + Path.cwd().name + '.txt', 'unblocked')
+    done('STATUS=COMPLETE', resumed or 'escalate-session')
 if 'did not end with the required VERDICT line' in prompt:
     done('VERDICT=PASS' if mode == 'review-missing-once' else 'Review complete.', resumed)
 if 'You are the ticket reviewer' in prompt:
     if mode in ('review-missing', 'review-missing-once'): done('## BLOCKING\\nNone.\\n## DEFERRED\\nNone.', 'ticket-review-session')
     if mode == 'review-edit': Path('work.txt').write_text('reviewer edit')
     if mode == 'review-cap' and not resumed: done('', 'ticket-review-session', 'max_turns', 8)
-    fail=mode == 'review-fail-always' or (mode == 'review-fail-once' and 'after one fix round' not in prompt)
+    fail=mode == 'review-fail-always' or (mode == 'review-fail-once' and 'after one fix round' not in prompt) \
+        or (mode == 'review-fail-until-escalated' and not Path('escalated-' + Path.cwd().name + '.txt').exists())
     done('## BLOCKING\\n' + ('- a.ts:1 wrong' if fail else 'None.') + '\\n## DEFERRED\\n- old bug in b.ts:2\\n'
          + ('VERDICT=FAIL' if fail else 'VERDICT=PASS'), 'ticket-review-session')
 if 'did not end with the required end line' in prompt:
@@ -272,7 +278,8 @@ if mode == 'empty': sys.exit(0)
 if mode == 'error':
     print(json.dumps({'type':'result', 'subtype':'error', 'finalText':'STATUS=COMPLETE'}))
     sys.exit(6)
-text = 'Finished the work' if mode in ('missing', 'missing-once') else 'STATUS=NEEDS_HUMAN' if mode == 'human' else 'STATUS=COMPLETE'
+text = 'Finished the work' if mode in ('missing', 'missing-once') else 'STATUS=NEEDS_HUMAN' \
+    if mode in ('human', 'escalate-human', 'escalate-cap') else 'STATUS=COMPLETE'
 print(json.dumps({'type':'event', 'event':{'type':'tool_running'}}))
 print(json.dumps({'type':'result', 'subtype':'max_turns' if cap else 'success', 'sessionId':'ticket-session',
                   'finalText':text}))
@@ -305,7 +312,8 @@ sys.exit(8 if cap else 0)
         for name in ('IMPL_MODEL', 'IMPL_EFFORT', 'IMPL_MAX_TURNS', 'EPIC_REVIEW_MODEL', 'EPIC_REVIEW_EFFORT', 'EPIC_REVIEW_MAX_TURNS',
                      'WORKFLOW', 'TICKET_REVIEW_MODEL', 'TICKET_REVIEW_EFFORT', 'TICKET_REVIEW_MAX_TURNS',
                      'VERIFY_MODEL', 'VERIFY_EFFORT', 'VERIFY_MAX_TURNS', 'GATE_CMDS', 'INSTALL_CMD',
-                     'LAUNCH_PLAN_MODEL', 'LAUNCH_PLAN_EFFORT', 'LAUNCH_PLAN_MAX_TURNS'):
+                     'LAUNCH_PLAN_MODEL', 'LAUNCH_PLAN_EFFORT', 'LAUNCH_PLAN_MAX_TURNS',
+                     'ESCALATE_MODEL', 'ESCALATE_EFFORT', 'ESCALATE_MAX_TURNS'):
             self.env.pop(name, None)
         self.configure(gate=['true'])
 
@@ -359,7 +367,8 @@ sys.exit(8 if cap else 0)
              ('You are the repair reviewer', 'repair review'), ('You write the launch plan', 'launch plan'),
              ('You are an epic reviewer', 'epic review'), ('Cross-examination', 'cross'), ('Self-check for epic', 'cross'),
              ('You are the ticket writer', 'ticket writer'), ('Follow-up review for epic', 'follow-up'),
-             ('You are the ticket reviewer', 'ticket review'), ('did not end with the required STATUS', 'status nudge'),
+             ('You are the ticket reviewer', 'ticket review'), ('You are taking over issue', 'escalate'),
+             ('found blocking problems in your work', 'fix'), ('did not end with the required STATUS', 'status nudge'),
              ('did not end with the required VERDICT', 'verdict nudge'),
              ('did not end with the required end line', 'end-line nudge'))
 
@@ -604,6 +613,90 @@ sys.exit(8 if cap else 0)
         self.assertNotIn('210', state)
         self.assertNotIn('_review', state)
         self.assertEqual(len(self.calls()), 4)  # implement, review, fix, re-review
+
+    # ── escalation ───────────────────────────────────────────────────────
+
+    def test_a_stuck_implementer_escalates_once_then_the_ticket_moves_on(self):
+        result = self.run_script('--escalate-model', 'claude', mode='human')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds()[:4], ['implement', 'escalate', 'implement', 'escalate'])
+        escalation = self.call('escalate', 0)
+        self.assertEqual(self.model(escalation), 'claude-sonnet-5-5')
+        self.assertNotIn('--resume', escalation)
+        prompt = self.prompt(escalation)
+        self.assertIn('You are taking over issue #209', prompt)
+        self.assertIn('ended status=NEEDS_HUMAN', prompt)
+        self.assertIn('207/209/final.txt', prompt)
+        self.assertIn('manual checks included', prompt)
+        record = self.state()['209']
+        self.assertEqual(record['status'], 'done')
+        self.assertEqual(record['escalation']['implement']['status'], 'reported')
+        self.assertNotIn('escalating', record)
+
+    def test_escalation_is_off_by_default_on_commandcode(self):
+        result = self.run_script(mode='human')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.kinds(), ['implement'])
+        self.assertEqual(self.state()['209']['status'], 'awaiting-human')
+
+    def test_an_escalation_that_needs_a_decision_awaits_a_human(self):
+        result = self.run_script('--escalate-model', 'claude', mode='escalate-human')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.kinds(), ['implement', 'escalate'])
+        record = self.state()['209']
+        self.assertEqual(record['status'], 'awaiting-human')
+        self.assertIn('escalate/implement/final.txt', record['reason'])
+        self.assertNotIn('210', self.state())
+
+    def test_an_interrupted_escalation_resumes_its_own_session(self):
+        result = self.run_script('--escalate-model', 'claude', mode='escalate-cap')
+        self.assertEqual(result.returncode, 1)
+        record = self.state()['209']
+        self.assertEqual((record['status'], record['phase']), ('turn-cap', 'escalate'))
+        self.run_script('--resume', '--escalate-model', 'claude', mode='escalate-cap')
+        resumed = self.call('escalate', 1)
+        self.assertEqual(resumed[resumed.index('--resume')+1], 'escalate-session')
+        self.assertEqual(self.kinds()[:3], ['implement', 'escalate', 'escalate'])
+        self.assertEqual(self.state()['209']['status'], 'done')
+        self.assertEqual(self.state()['209']['sessionId'], 'ticket-session')  # The implementer's session survives.
+
+    def test_osmani_review_still_blocking_after_the_fix_round_escalates_then_re_reviews(self):
+        self.plan_osmani()
+        result = self.run_osmani('--escalate-model', 'claude', mode='review-fail-until-escalated')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kinds()[:6], ['implement', 'ticket review', 'fix', 'ticket review', 'escalate',
+                                            'ticket review'])
+        folder = '.scratch/run-tickets-commandcode/207/209'
+        self.assertIn(f'{folder}/review/round-2/final.txt', self.prompt(self.call('escalate', 0)))
+        third = self.prompt(self.calls()[5])
+        self.assertIn(f'{folder}/review/round-2/final.txt', third)
+        self.assertIn(f'{folder}/escalate/review/final.txt', third)
+        self.assertEqual(self.model(self.calls()[5]), self.model(self.calls()[1]))
+        record = self.state()['209']
+        self.assertEqual((record['status'], record['ticketReview']['round']), ('done', 3))
+
+    def test_osmani_still_blocking_after_an_escalation_needs_a_human(self):
+        self.plan_osmani()
+        result = self.run_osmani('--escalate-model', 'claude', mode='review-fail-always')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.kinds(), ['implement', 'ticket review', 'fix', 'ticket review', 'escalate', 'ticket review'])
+        self.assertIn('after one fix round and an escalation', self.state()['209']['reason'])
+
+    def test_app_verification_guide_reaches_every_working_prompt(self):
+        self.plan_osmani()
+        (self.root / 'docs').mkdir()
+        (self.root / 'docs/app.md').write_text('Use the emulator.\n')
+        self.git('add', 'docs/app.md')
+        self.configure(appVerification='docs/app.md')
+        result = self.run_osmani('--escalate-model', 'claude', mode='review-fail-until-escalated')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for kind in ('implement', 'escalate'):
+            self.assertIn('docs/app.md says how to run the app', self.prompt(self.call(kind, 0)))
+        self.assertNotIn('docs/app.md', self.prompt(self.call('ticket review', 0)))
+        self.configure(appVerification='docs/missing.md')
+        result = self.run_osmani('--dry-run')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('appVerification docs/missing.md does not exist', result.stdout + result.stderr)
 
     def test_osmani_interrupted_ticket_review_resumes_its_own_session(self):
         self.plan_osmani()

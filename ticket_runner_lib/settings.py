@@ -39,7 +39,7 @@ EFFORTS.update({m: CLAUDE_EFFORTS for m in CLAUDE_MODELS.values()})
 # Per-stage spend caps (claude-api only), passed to that stage's sessions as --max-budget-usd.
 BUDGETS = {"implement": "IMPL_MAX_BUDGET_USD", "ticket review": "TICKET_REVIEW_MAX_BUDGET_USD",
            "epic review": "EPIC_REVIEW_MAX_BUDGET_USD", "verify": "VERIFY_MAX_BUDGET_USD",
-           "launch plan": "LAUNCH_PLAN_MAX_BUDGET_USD"}
+           "launch plan": "LAUNCH_PLAN_MAX_BUDGET_USD", "escalate": "ESCALATE_MAX_BUDGET_USD"}
 # Sessions that spend another stage's budget: they run on that stage's model.
 BUDGET_OF = {"fix": "implement", "integration repair": "implement", "verify repair": "implement",
              "repair review": "epic review"}
@@ -87,12 +87,15 @@ TICKET_WRITING_SKILLS = {"osmani": "planning-and-task-breakdown", "pocock": "to-
 EPIC_REVIEWERS = "deepseek,glm"
 # Each backend's (model, effort) per stage, keyed by the stage's argument prefix; used only where no flag or
 # env var names one. CommandCode's implementation effort follows its model (see cli.py).
+# The escalation model takes over a stuck ticket; "off" leaves it to a human (CommandCode by default, so a
+# run never starts spending on Claude unless asked).
 COMMANDCODE_DEFAULTS = {"": ("flash", None), "ticket_review_": ("luna,glm", "high"), "verify_": ("luna", "high"),
-                        "epic_review_": (EPIC_REVIEWERS, "high"), "launch_plan_": ("deepseek", "high")}
+                        "epic_review_": (EPIC_REVIEWERS, "high"), "launch_plan_": ("deepseek", "high"),
+                        "escalate_": ("off", "high")}
 CLAUDE_DEFAULTS = {"": ("sonnet", "medium"), "ticket_review_": ("opus", "medium"), "verify_": ("sonnet", "medium"),
-                   "epic_review_": ("opus", "high"), "launch_plan_": ("haiku", "low")}
+                   "epic_review_": ("opus", "high"), "launch_plan_": ("haiku", "low"), "escalate_": ("opus", "high")}
 CODEX_DEFAULTS = {"": ("luna", "high"), "ticket_review_": ("luna", "high"), "verify_": ("luna", "high"),
-                  "epic_review_": ("sol", "high"), "launch_plan_": ("luna", "low")}
+                  "epic_review_": ("sol", "high"), "launch_plan_": ("luna", "low"), "escalate_": ("sol", "xhigh")}
 BACKEND_DEFAULTS = {"commandcode": COMMANDCODE_DEFAULTS, "claude-api": CLAUDE_DEFAULTS, "codex": CODEX_DEFAULTS}
 BACKEND_MODELS = {"commandcode": MODELS, "claude-api": CLAUDE_MODELS, "codex": CODEX_MODELS}
 BACKEND_EFFORTS = {"commandcode": None, "claude-api": CLAUDE_EFFORTS, "codex": CODEX_EFFORTS}
@@ -122,7 +125,7 @@ CONFIG = ".agents/ticket-runner.json"
 DEFAULTS = {"install": "npm ci", "lockfiles": ["package-lock.json"], "dependencyDirs": ["node_modules"],
             "linkFiles": [".env"], "gate": ["npx tsc --noEmit", "npm test"], "verify": [], "serve": None,
             "ready": None, "readyTimeout": 120, "serveEnv": None, "browser": False, "prBase": None,
-            "mergeMethod": "merge"}
+            "mergeMethod": "merge", "appVerification": None}
 MERGE_METHODS = ("merge", "squash", "rebase")
 # Copy-on-write clones keep each worktree's dependency directories isolated at near-zero cost.
 CLONES = (["cp", "-cR"], ["cp", "-R"]) if sys.platform == "darwin" else (["cp", "-R", "--reflink=auto"],)
