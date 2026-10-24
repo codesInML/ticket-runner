@@ -23,18 +23,24 @@ class Reviews:
             rec = record.setdefault("ticketReview", {})
         if record.get("phase") == "fix" and not self.fix(n, record, rec, tdir):
             return
+        if self.a.resume and record.get("status") == "needs-human" and rec.get("status") == "fail":
+            # A person fixed the last review's findings in the worktree: the next round re-reviews against them.
+            last = rec.get("round", 1)
+            self.update(rec, round=last + 1, previousReport=str(tdir / "review" / f"round-{last}" / "final.txt"),
+                        fixReport="", reviewedHead=rec.get("reviewedHead") or rec.get("head"), drop=("sessionId",))
         while True:
             round_, model = rec.get("round", 1), rec.get("model") or self.reviewer_for(n)
             head = git(wt, "rev-parse", "HEAD")
             session = rec.get("sessionId") if self.a.resume and rec.get("status") in RETRYABLE \
                 and rec.get("head") == head else None
+            since = rec.get("reviewedHead") if round_ > 1 else None
             self.update(record, status="in-review", phase="review")
             self.update(rec, round=round_, model=model, drop=() if session else ("sessionId",))
             say(f"\n━━ #{n}: ticket review round {round_} with {model} ━━", BOLD, color)
             folder = tdir / "review" / f"round-{round_}"
             text = self.run_agent(model, self.a.ticket_review_effort, self.a.ticket_review_max_turns,
                                   self.review_prompt(n, tdir, base, round_, rec.get("previousReport"),
-                                                     rec.get("fixReport")), folder, rec, session, cwd=wt,
+                                                     rec.get("fixReport"), since), folder, rec, session, cwd=wt,
                                   tag=f"#{n} review", color=color, stage="ticket review")
             self.guard()
             if rec["status"] == "reported" and verdict(text, VERDICT) == "MISSING" and rec.get("sessionId"):
@@ -54,7 +60,7 @@ exactly one line for your review as it stands: VERDICT=PASS when nothing is BLOC
                 return self.fail(n, record, rec["status"], f"ticket review ended {rec['status']}; "
                                  f"--resume retries it (logs in {folder})")
             result = verdict(text, VERDICT)
-            self.update(rec, status=result.lower())
+            self.update(rec, status=result.lower(), reviewedHead=head)
             if result == "PASS":
                 self.update(record, status="ready-to-merge", phase="integrate", drop=("reason",))
                 return say(f"#{n} passed ticket review round {round_}; waiting to integrate", GREEN, BOLD)

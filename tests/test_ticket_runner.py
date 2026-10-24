@@ -603,6 +603,30 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.state()['209']['status'], 'done')
         self.assertEqual(self.state()['209']['ticketReview']['round'], 2)
 
+    def test_osmani_re_review_judges_only_the_fix_diff_for_new_findings(self):
+        self.plan_osmani()
+        result = self.run_osmani(mode='review-fail-once')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first, again = self.prompt(self.calls()[1]), self.prompt(self.calls()[3])
+        self.assertNotIn('must come from the fix itself', first)
+        since = __import__('re').search(r'must come from the fix itself: git diff ([0-9a-f]{40})\.\.HEAD', again)[1]
+        # Round one read the implementer's commit; the fix round committed once on top of it.
+        reviewed = self.state()['209']['ticketReview']['reviewedHead']
+        self.assertEqual(since, self.git('rev-parse', reviewed + '^'))
+        self.assertIn('goes under DEFERRED', again)
+
+    def test_osmani_resume_after_a_person_fixes_the_review_re_reviews_their_commits(self):
+        self.plan_osmani()
+        self.assertEqual(self.run_osmani(mode='review-fail-always').returncode, 1)
+        result = self.run_osmani('--resume')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        again = self.prompt(self.calls()[4])
+        self.assertIn('You are the ticket reviewer', again)
+        self.assertIn('209/review/round-2/final.txt', again)
+        self.assertIn("the fix is a person's commits", again)
+        self.assertEqual(self.state()['209']['ticketReview']['round'], 3)
+        self.assertEqual(self.state()['209']['status'], 'done')
+
     def test_osmani_still_blocking_after_the_fix_round_holds_dependents(self):
         self.plan_osmani()
         result = self.run_osmani(mode='review-fail-always')

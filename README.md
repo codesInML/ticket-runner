@@ -11,7 +11,10 @@ runner hands it once per kind (implement, review) to the escalation model (`--es
 session runs in a fresh thread in the ticket's worktree with the earlier reports. It is told to fix the
 problem, run the checks itself, and stop only for a decision that belongs to a person. A review escalation
 is followed by one more review round with the same reviewer; a ticket still blocking after that needs a
-human. An escalation that ends NEEDS_HUMAN waits on the issue (`awaiting-human`) as before, and an
+human. Every re-review confirms the previous findings and draws new BLOCKING findings only from the
+fix diff (since the commit the previous review read); older problems it notices are DEFERRED unless they
+leave a criterion UNMET. After a person fixes a needs-human ticket in its worktree, `--resume` re-reviews
+their commits against the last review the same way. An escalation that ends NEEDS_HUMAN waits on the issue (`awaiting-human`) as before, and an
 interrupted one resumes its own thread with `--resume`.
 
 Every implement, fix and escalation prompt tells the session to run the ticket's Verification checks

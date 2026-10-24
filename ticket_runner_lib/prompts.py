@@ -92,14 +92,21 @@ runner, {self.hands_off}, agent configuration, hooks, or anything under {self.fo
         return (f"Follow {self.skill_file('debugging-and-error-recovery')}: reproduce, localize, fix, then guard "
                 "with a regression test, since nobody else will cover this interaction between tickets.\n")
 
-    def review_prompt(self, n, tdir, base, round_, previous=None, fixed=None):
+    def review_prompt(self, n, tdir, base, round_, previous=None, fixed=None, since=None):
+        """A re-review (`round_` > 1) checks the previous findings and judges only the fix diff for new ones,
+        so each round cannot raise problems the code already had when the previous review read it."""
         s = self.skill_file
         previous = previous or tdir / "review" / f"round-{round_ - 1}" / "final.txt"
-        fixed = fixed or tdir / "fix" / "final.txt"
+        fix = ("the fix is a person's commits, with no report" if fixed == "" else
+               f"the fix round's report is at {fixed or tdir / 'fix' / 'final.txt'}")
+        scope = (f"""New BLOCKING findings must come from the fix itself: git diff {since}..HEAD. A problem in code that
+diff leaves untouched was there when the previous review read it, so it goes under DEFERRED, unless it
+leaves an acceptance criterion UNMET.
+""") if since else ""
         again = f"""This is the re-review after one fix round. The previous review is at
-{previous} and the fix round's report at {fixed}.
+{previous}, and {fix}.
 Confirm every BLOCKING finding there is fixed and raise anything the fix broke.
-""" if round_ > 1 else ""
+{scope}""" if round_ > 1 else ""
         return f"""You are the ticket reviewer for issue #{n} of epic #{self.a.parent}. Someone else wrote this
 code; review it with fresh eyes and take none of their claims on trust.
 Read AGENTS.md and the ticket at {tdir / 'ticket.md'}, then follow {s('code-review-and-quality')}
