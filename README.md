@@ -7,7 +7,7 @@ Run `bin/ticket-runner --help` for workflow, configuration, and resume options.
 A ticket is stuck when its implementer ends NEEDS_HUMAN, BLOCKED or without a STATUS line, when its fix
 round does, or when its ticket review still blocks after the fix round. Before it goes to a person, the
 runner hands it once per kind (implement, review) to the escalation model (`--escalate-model`, env
-`ESCALATE_MODEL`, default `sol` @ xhigh on codex and `opus` @ high on claude-api, `off` on commandcode). That
+`ESCALATE_MODEL`, default `sol` @ medium on codex and `opus` @ high on claude-api, `off` on commandcode). That
 session runs in a fresh thread in the ticket's worktree with the earlier reports. It is told to fix the
 problem, run the checks itself, and stop only for a decision that belongs to a person. A review escalation
 is followed by one more review round with the same reviewer; a ticket still blocking after that needs a
@@ -56,7 +56,7 @@ remain there for `--resume`. Browser verification receives Chrome DevTools confi
 | Epic review, repair review | `gpt-6.1-sol` | high |
 | Verify | `gpt-6-luna` | high |
 | Launch plan | `gpt-6-luna` | low |
-| Escalate (a stuck ticket) | `gpt-6.1-sol` | xhigh |
+| Escalate (a stuck ticket) | `gpt-6.1-sol` | medium |
 
 Aliases `luna` and `sol`, or full `gpt-*` IDs, work for every stage; flags and environment variables
 override defaults. Luna accepts low/medium/high/xhigh/max; Sol also accepts ultra. The epic review has

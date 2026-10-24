@@ -106,7 +106,7 @@ class CodexBackendTests(base.RunnerTests):
         self.assertIn(f'Backend: codex, ChatGPT login from {self.auth}', result.stdout)
         for text in ('implement     gpt-6-luna @ high', 'ticket review gpt-6-luna @ high',
                      'epic review   gpt-6.1-sol @ high', 'launch plan   gpt-6-luna @ low',
-                     'escalate      gpt-6.1-sol @ xhigh'):
+                     'escalate      gpt-6.1-sol @ medium'):
             self.assertIn(text, result.stdout)
         self.assertIn('ticket review shares gpt-6-luna with the implementer', result.stderr)
 

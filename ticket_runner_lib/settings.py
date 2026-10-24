@@ -95,7 +95,7 @@ COMMANDCODE_DEFAULTS = {"": ("flash", None), "ticket_review_": ("luna,glm", "hig
 CLAUDE_DEFAULTS = {"": ("sonnet", "medium"), "ticket_review_": ("opus", "medium"), "verify_": ("sonnet", "medium"),
                    "epic_review_": ("opus", "high"), "launch_plan_": ("haiku", "low"), "escalate_": ("opus", "high")}
 CODEX_DEFAULTS = {"": ("luna", "high"), "ticket_review_": ("luna", "high"), "verify_": ("luna", "high"),
-                  "epic_review_": ("sol", "high"), "launch_plan_": ("luna", "low"), "escalate_": ("sol", "xhigh")}
+                  "epic_review_": ("sol", "high"), "launch_plan_": ("luna", "low"), "escalate_": ("sol", "medium")}
 BACKEND_DEFAULTS = {"commandcode": COMMANDCODE_DEFAULTS, "claude-api": CLAUDE_DEFAULTS, "codex": CODEX_DEFAULTS}
 BACKEND_MODELS = {"commandcode": MODELS, "claude-api": CLAUDE_MODELS, "codex": CODEX_MODELS}
 BACKEND_EFFORTS = {"commandcode": None, "claude-api": CLAUDE_EFFORTS, "codex": CODEX_EFFORTS}
