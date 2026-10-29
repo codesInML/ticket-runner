@@ -18,13 +18,14 @@ from .text import empty, review_rows, says_none, section, verdict
 
 FINDING = ("BLOCKING", "DEFERRED")
 STEPS = {"review": "independent review", "check": "cross-examination", "tickets": "fix ticket drafts",
-         "follow": "follow-up review", "follow-check": "follow-up cross-examination"}
+         "follow": "follow-up review", "follow-check": "follow-up cross-examination",
+         "repair": "repair review of a person's fixes"}
 # The line each step's report must end with, and how a nudge asks for it.
 ENDS = {"review": (r"VERDICT=(SHIP|FIX-FIRST)", "VERDICT=SHIP when nothing is BLOCKING, otherwise VERDICT=FIX-FIRST"),
         "check": (r"CHECK=(DONE)", "CHECK=DONE"), "follow-check": (r"CHECK=(DONE)", "CHECK=DONE"),
         "tickets": (r"STATUS=(COMPLETE|NEEDS_HUMAN|BLOCKED)",
                     "STATUS=COMPLETE, or STATUS=NEEDS_HUMAN when a fix needs a human decision"),
-        "follow": (r"FOLLOW-UP=(DONE)", "FOLLOW-UP=DONE")}
+        "follow": (r"FOLLOW-UP=(DONE)", "FOLLOW-UP=DONE"), "repair": (r"REPAIR=(DONE)", "REPAIR=DONE")}
 
 
 def reviewer_name(model):
@@ -83,8 +84,11 @@ class EpicReview:
             return head == rv["start"]
         if phase == "fix":  # Fix tickets integrating move the epic on from where the review started.
             return not attempt(self.root, "merge-base", "--is-ancestor", rv["start"], head).returncode
-        if phase in ("follow", "follow-check", "blocked"):
+        if phase in ("follow", "follow-check"):
             return head == rv.get("fixHead")
+        if phase in ("blocked", "repair"):  # A person's fixes on the epic branch get the repair review.
+            return bool(rv.get("fixHead")) and \
+                not attempt(self.root, "merge-base", "--is-ancestor", rv["fixHead"], head).returncode
         return False
 
     def epic_review(self):
@@ -101,7 +105,8 @@ class EpicReview:
             rv = self.fresh_review(head)
         steps = {"review": self.first_round, "check": self.check_round, "tickets": self.write_tickets,
                  "file": self.file_tickets, "fix": self.run_fixes, "follow": self.follow_up,
-                 "follow-check": lambda rv: self.check_round(rv, follow=True), "blocked": self.still_blocked}
+                 "follow-check": lambda rv: self.check_round(rv, follow=True), "blocked": self.still_blocked,
+                 "repair": self.repair_round}
         while True:
             result = steps[rv["phase"]](rv)
             if result is not None:
@@ -516,10 +521,62 @@ exactly one line for your report as it stands: {line}.
         self.write_report(rv)
         self.post_findings(rv)
         return self.epic_fail(rv, "needs-human", f"{reason}; see {self.review_dir() / 'report.md'}. Fix it on the "
-                              "epic branch, then --epic-only reviews again")
+                              "epic branch, then --epic-only reviews only your commits")
 
     def still_blocked(self, rv):
+        """Blocked until a person commits on the epic branch; their commits get the repair review."""
+        if git(self.root, "rev-parse", "HEAD") != rv.get("repairHead", rv["fixHead"]):
+            self.update(rv, phase="repair")
+            return None
         return self.epic_fail(rv, "needs-human", rv.get("reason") or "the epic review is still blocked")
+
+    def unresolved(self, rv):
+        """Confirmed blocking findings no review has seen fixed since: open after the fix tickets, or introduced since."""
+        def fixed(f):
+            if f.get("repairs"):
+                return f["repairs"][-1][1] == "FIXED"
+            return f["round"] == "review" and not any(v == "NOT FIXED" for v, _ in f.get("fixes", {}).values())
+        return [i for i, f in rv["findings"].items() if self.blocking(f) and not fixed(f)]
+
+    def repair_round(self, rv):
+        """The last reviewer reads only a person's commits since the fix tickets: SHIP, or blocked again.
+
+        Never a fresh review: the epic was reviewed whole once, so later rounds judge only what changed.
+        """
+        head, targets, r = git(self.root, "rev-parse", "HEAD"), self.unresolved(rv), rv["reviewers"][-1]
+        if not targets:
+            return self.review_ship(rv)
+        texts = self.run_reviewers(rv, [r], "repair", lambda r: self.epic_repair_prompt(rv, r, targets))
+        if texts is None or self.stopped(rv):
+            return 1
+        text = texts[r["model"]]
+        fixes, problem = review_rows(section(text, "FIXES"), ("NOT FIXED", "FIXED"))
+        found, find_problem = self.parse_findings(text, r, ENDS["repair"][0])
+        problem = problem or find_problem
+        if not problem and sorted(i for i, _, _ in fixes) != sorted(targets):
+            problem = f"it must mark each of {', '.join(targets)} FIXED or NOT FIXED exactly once"
+        if not problem and set(found) & set(rv["findings"]):
+            problem = "its new findings reuse earlier IDs"
+        if problem:
+            return self.epic_fail(rv, "needs-human", f"unusable repair review ({r['name']}: {problem}); see "
+                                  f"{self.review_dir() / r['dir'] / 'repair'}; --epic-only asks again")
+        with self.state:
+            for i, verb, evidence in fixes:
+                rv["findings"][i].setdefault("repairs", []).append([head, verb, evidence])
+            for i, (cls, text_) in found.items():  # One reviewer, so its findings stand unchecked.
+                rv["findings"][i] = {"by": r["model"], "class": cls, "text": text_, "round": "repair",
+                                     "outcome": "confirmed", "repairHead": head}
+            rv["repairHead"] = head
+            self.persist()
+        open_ = self.unresolved(rv)
+        if not open_:
+            self.update(rv, acceptedRepairs=list(dict.fromkeys([*rv.get("acceptedRepairs", []), head])))
+            return self.review_ship(rv)
+        self.update(rv, phase="blocked")
+        self.write_report(rv)
+        return self.epic_fail(rv, "needs-human", f"the repair review of {rv['fixHead'][:8]}..{head[:8]} still blocks "
+                              f"on {', '.join(open_)}; see {self.review_dir() / 'report.md'}. Fix it on the epic "
+                              "branch, then --epic-only reviews the repair again")
 
     def review_ship(self, rv):
         head = git(self.root, "rev-parse", "HEAD")
@@ -566,6 +623,8 @@ exactly one line for your report as it stands: {line}.
                 text += f" — withdrawn: {f.get('withdrawn') or f.get('answer') or 'no detail'}"
             for model, (verb, evidence) in f.get("fixes", {}).items():
                 text += f"\n  - {name(model)}: {verb} {evidence}".rstrip()
+            for head, verb, evidence in f.get("repairs", []):
+                text += f"\n  - repair review at {head[:8]}: {verb} {evidence}".rstrip()
             return text
         groups = {"Confirmed blocking findings": lambda f: self.blocking(f),
                   "Deferred findings": lambda f: f["class"] == "DEFERRED" and outcome(f) == "confirmed",
@@ -577,7 +636,8 @@ exactly one line for your report as it stands: {line}.
         """The runner's consolidated report: the launch plan and the pull request read this, not a reviewer's."""
         names = ", ".join(f"{r['name']} ({r['letter']})" for r in rv["reviewers"])
         fixes = (f"; fix tickets {' '.join(f'#{n}' for n in rv['fixTickets'])}" if rv.get("fixTickets") else "") + \
-            (f" up to `{rv['fixHead'][:8]}`" if rv.get("fixHead") else "")
+            (f" up to `{rv['fixHead'][:8]}`" if rv.get("fixHead") else "") + \
+            (f"; a person's fixes repair-reviewed up to `{rv['repairHead'][:8]}`" if rv.get("repairHead") else "")
         lines = [f"# Epic review of #{self.a.parent}", "",
                  f"Reviewers: {names}. Reviewed `{rv['start'][:8]}`{fixes}. Status: {rv['status']}."]
         for title, items in self.report_sections(rv).items():

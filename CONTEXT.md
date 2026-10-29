@@ -61,8 +61,9 @@ The stage that runs the project's verify commands and runtime checks against the
 The single agent that fixes a failed verify in the verify worktree.
 
 **Repair review**:
-A one-reviewer review of only the verify repair's diff, extending the epic review's SHIP to the repaired
-head.
+A one-reviewer review of only a repair's diff: the verify repair's, extending the epic review's SHIP to
+the repaired head, or a person's commits on the epic branch after the epic review blocked, which marks
+each open finding fixed or not and ships when nothing still blocks. It never re-reviews the whole epic.
 
 **Launch plan**:
 The runner-pasted section of the pull request covering the pre-launch checklist, risk and rollback.

@@ -194,7 +194,12 @@ cross-examination or self-check must answer each ID it is given exactly once; th
 not a model, decides which findings are confirmed, disputed or withdrawn. Only confirmed
 blocking findings become fix tickets, and only the runner files them, with a marker in each
 body so a retry finds an issue it already filed instead of filing it twice. One follow-up
-review reads only the fix diff; anything still blocking needs a human. A verify repair after
-SHIP gets a repair review, and `--merge` accepts a head only through that chain. See
+review reads only the fix diff; anything still blocking needs a human. When that person commits
+fixes on the epic branch, `--epic-only` gives their commits (since the fix tickets) a repair review by
+the last reviewer instead of a fresh review of the whole epic: each open finding FIXED or NOT FIXED,
+plus anything those commits broke. It repeats for each later commit until it says SHIP, and only a
+branch that no longer contains the fix tickets, or changed requirements or reviewers, start over. A
+verify repair after SHIP gets a repair review too, and `--merge` accepts a head only through that
+chain. See
 `CONTEXT.md` for the vocabulary and `docs/adr/0001-*` for why.
 

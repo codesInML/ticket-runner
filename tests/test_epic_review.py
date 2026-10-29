@@ -106,3 +106,56 @@ class ReviewInputTests(unittest.TestCase):
             '## FINDINGS\n- R1 BLOCKING fixed.py:1 — wrong — code evidence\nVERDICT=PASS',
             {'letter': 'R'}, r'VERDICT=(PASS|FAIL)')
         self.assertIn('contradictory', problem)
+
+
+class RepairResumeTests(unittest.TestCase):
+    def review(self, phase):
+        review = EpicReview()
+        review.a = SimpleNamespace(workflow='pocock', epic_review_models=['glm'])
+        review.root = '/repo'
+        review.review_fingerprint = lambda rv=None: 'same'
+        rv = {'protocol': 3, 'workflow': 'pocock', 'models': ['glm'], 'fingerprint': 'same', 'phase': phase,
+              'start': 'start', 'fixHead': 'fixhead'}
+        return review, rv
+
+    def resumable(self, phase, ancestor, **changes):
+        review, rv = self.review(phase)
+        rv.update(changes)
+        merge_base = SimpleNamespace(returncode=0 if ancestor else 1)
+        with mock.patch('ticket_runner_lib.epic_review.REVIEW_PROTOCOL', 3), \
+                mock.patch('ticket_runner_lib.epic_review.attempt', return_value=merge_base) as attempt:
+            return review.review_resumable(rv, 'personhead'), attempt
+
+    def test_a_blocked_review_resumes_into_the_repair_review_for_a_descendant_head(self):
+        for phase in ('blocked', 'repair'):
+            with self.subTest(phase=phase):
+                resumable, attempt = self.resumable(phase, ancestor=True)
+                self.assertTrue(resumable)
+                attempt.assert_called_once_with('/repo', 'merge-base', '--is-ancestor', 'fixhead', 'personhead')
+
+    def test_a_head_that_dropped_the_fix_tickets_gets_a_fresh_review(self):
+        self.assertFalse(self.resumable('blocked', ancestor=False)[0])
+        self.assertFalse(self.resumable('blocked', ancestor=True, fixHead=None)[0])
+
+    def test_changed_requirements_or_reviewers_still_get_a_fresh_review(self):
+        self.assertFalse(self.resumable('blocked', ancestor=True, fingerprint='changed')[0])
+        self.assertFalse(self.resumable('blocked', ancestor=True, models=['sol'])[0])
+
+    def test_a_mid_follow_up_review_still_needs_its_own_head(self):
+        self.assertFalse(self.resumable('follow-check', ancestor=True)[0])
+        self.assertTrue(self.resumable('follow-check', ancestor=True, fixHead='personhead')[0])
+
+    def test_only_findings_no_review_has_seen_fixed_stay_open(self):
+        review = EpicReview()
+        confirmed = {'class': 'BLOCKING', 'outcome': 'confirmed'}
+        rv = {'findings': {
+            'G1': {**confirmed, 'round': 'review', 'fixes': {'sol': ['FIXED', 'ok']}},
+            'G2': {**confirmed, 'round': 'review', 'fixes': {'sol': ['NOT FIXED', 'no']}},
+            'G3': {**confirmed, 'round': 'follow'},
+            'G4': {**confirmed, 'round': 'follow', 'repairs': [['h1', 'NOT FIXED', 'no'], ['h2', 'FIXED', 'ok']]},
+            'G5': {**confirmed, 'round': 'review', 'fixes': {'sol': ['NOT FIXED', 'no']},
+                   'repairs': [['h1', 'FIXED', 'ok']]},
+            'G6': {'class': 'DEFERRED', 'outcome': 'confirmed', 'round': 'repair'},
+            'G7': {**confirmed, 'round': 'repair'},
+        }}
+        self.assertEqual(review.unresolved(rv), ['G2', 'G3', 'G7'])

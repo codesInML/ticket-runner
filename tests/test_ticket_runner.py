@@ -237,6 +237,14 @@ if 'Follow-up review for epic' in prompt:
     new = ['- D3 BLOCKING c.ts:1 — the fix crashes — c.ts:1'] if mode == 'fix-regression' and letter == 'D' else []
     done('## FIXES\\n' + '\\n'.join(fixes) + '\\n## FINDINGS\\n' + ('\\n'.join(new) or 'None.') + '\\nFOLLOW-UP=DONE',
          resumed or 'follow-session')
+if 'Repair review for epic' in prompt:
+    letter, number = re.search(r'numbered on from ([A-Z])(\\d+)', prompt).groups()
+    repair = os.environ.get('REPAIR', 'fixed')
+    verb = 'NOT FIXED' if repair == 'not-fixed' else 'FIXED'
+    fixes = ['- %s %s a.ts:1 counts once' % (i, verb) for i in ids('IDs:')]
+    new = ['- %s%s BLOCKING d.ts:1 — the repair crashes — d.ts:1' % (letter, number)] if repair == 'regression' else []
+    done('## FIXES\\n' + '\\n'.join(fixes) + '\\n## FINDINGS\\n' + ('\\n'.join(new) or 'None.') + '\\nREPAIR=DONE',
+         resumed or 'epic-repair-session')
 if mode in ('parallel', 'parallel-conflict'):
     if 'stopped with conflicts' in prompt:
         Path('shared.txt').write_text('209 and 210\\n')
@@ -367,6 +375,7 @@ sys.exit(8 if cap else 0)
              ('You are the repair reviewer', 'repair review'), ('You write the launch plan', 'launch plan'),
              ('You are an epic reviewer', 'epic review'), ('Cross-examination', 'cross'), ('Self-check for epic', 'cross'),
              ('You are the ticket writer', 'ticket writer'), ('Follow-up review for epic', 'follow-up'),
+             ('Repair review for epic', 'epic repair'),
              ('You are the ticket reviewer', 'ticket review'), ('You are taking over issue', 'escalate'),
              ('found blocking problems in your work', 'fix'), ('did not end with the required STATUS', 'status nudge'),
              ('did not end with the required VERDICT', 'verdict nudge'),
@@ -1541,6 +1550,53 @@ sys.exit(8 if cap else 0)
         before = len(self.calls())
         self.assertEqual(self.run_script('--epic-only', mode='fix-not-fixed').returncode, 1)
         self.assertEqual(len(self.calls()), before)  # Same head: still blocked, no agent asked again.
+
+    def human_fix(self, name):
+        (self.root / name).write_text("fixed by a person\n")
+        self.git("add", name)
+        self.git("commit", "-qm", f"Fix {name}")
+        return self.git("rev-parse", "HEAD")
+
+    def test_a_persons_fixes_after_a_blocked_review_get_the_repair_review_not_a_fresh_one(self):
+        self.assertEqual(self.run_script(mode='fix-not-fixed').returncode, 1)
+        fix_head = self.state()['_review']['fixHead']
+        first = self.human_fix('human-1.txt')
+        self.env['REPAIR'] = 'regression'
+        self.assertEqual(self.run_script('--epic-only', mode='fix-not-fixed').returncode, 1)
+        review = self.state()['_review']
+        self.assertEqual((review['phase'], review['repairHead']), ('blocked', first))
+        self.assertIn('still blocks on G2', review['reason'])
+        repair = self.call('epic repair')
+        self.assertIn(f'git diff {fix_head}..HEAD', self.prompt(repair))
+        self.assertIn('IDs: D2, G1', self.prompt(repair))
+        self.assertEqual(repair[repair.index('--resume')+1], 'epic-G')  # The last reviewer's own session.
+        before = len(self.calls())
+        self.assertEqual(self.run_script('--epic-only', mode='fix-not-fixed').returncode, 1)
+        self.assertEqual(len(self.calls()), before)  # Same head: still blocked, no agent asked again.
+
+        second = self.human_fix('human-2.txt')
+        self.env['REPAIR'] = 'fixed'
+        result = self.run_script('--epic-only', mode='fix-not-fixed')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('IDs: G2', self.prompt(self.call('epic repair')))
+        self.assertEqual(self.kinds().count('epic review'), 2)  # Never a fresh review of the whole epic.
+        self.assertEqual(self.kinds().count('epic repair'), 2)
+        review = self.state()['_review']
+        self.assertEqual((review['status'], review['head']), ('ship', second))
+        self.assertIn(second, review['acceptedRepairs'])
+        report = (self.root / '.scratch/run-tickets-commandcode/207/review/report.md').read_text()
+        self.assertIn(f'repair review at {second[:8]}: FIXED a.ts:1 counts once', report)
+        self.assertIn('- G2 (glm) d.ts:1 — the repair crashes', report)
+
+    def test_a_repair_review_that_still_finds_it_not_fixed_needs_a_human(self):
+        self.assertEqual(self.run_script(mode='fix-not-fixed').returncode, 1)
+        self.human_fix('human-1.txt')
+        self.env['REPAIR'] = 'not-fixed'
+        self.assertEqual(self.run_script('--epic-only', mode='fix-not-fixed').returncode, 1)
+        review = self.state()['_review']
+        self.assertEqual(review['status'], 'needs-human')
+        self.assertIn('still blocks on D2, G1', review['reason'])
+        self.assertNotIn('launch plan', self.kinds())
 
     def test_a_regression_the_fixes_introduce_needs_a_human(self):
         result = self.run_script(mode='fix-regression')

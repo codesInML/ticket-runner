@@ -20,8 +20,12 @@ invalidates the stages after it):
                them with the workflow's skill, the runner files them as sub-issues labelled
                epic-review-fix, and they run like any ticket. One follow-up review of only
                the fix diff marks each finding FIXED or NOT FIXED; anything still blocking
-               needs a human. On SHIP every sub-ticket closes (the epic stays open), and the
-               deferred and disputed findings are posted on the epic.
+               needs a human. Once that person commits fixes on the epic branch, --epic-only
+               runs a repair review: the last reviewer reads only their commits since the fix
+               tickets, marks each open finding FIXED or NOT FIXED and reports what the commits
+               broke; it never reviews the whole epic again. On SHIP every sub-ticket closes
+               (the epic stays open), and the deferred and disputed findings are posted on the
+               epic.
   verify       the project's verify commands in a worktree at the epic tip, then, when the
                config sets serve, the app started with serveEnv and a read-only verifier that
                marks each Verification item and checkpoint VERIFIED, FAILED or UNVERIFIABLE.
@@ -163,7 +167,8 @@ Epic stages: --epic-only runs only them (and any fix tickets); --no-verify,
 unless verify ran and passed and the epic review said SHIP for the head (through the repair
 review after a verify repair). --resume also continues an interrupted epic reviewer,
 verifier, verify repair, repair review or launch plan session. A needs-human verify keeps .scratch/worktrees/verify
-(branch cc/<parent>/verify): fix it there, commit, then --epic-only.
+(branch cc/<parent>/verify): fix it there, commit, then --epic-only. A needs-human epic review: fix
+it on the epic branch, commit, then --epic-only gives those commits the repair review.
 
 Merged (done) and closed tickets are always skipped. --resume continues the saved
 agent session of an unfinished ticket in its kept worktree, and retries

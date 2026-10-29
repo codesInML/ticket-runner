@@ -264,6 +264,21 @@ Anything outside the fix diff is out of scope. Write "None." when there are none
 {self.read_only}End with exactly one line: FOLLOW-UP=DONE
 """
 
+    def epic_repair_prompt(self, rv, r, targets):
+        used = [int(i[1:]) for i in rv["findings"] if i[0] == r["letter"]]
+        listed = "\n".join(f"  {i}: {rv['findings'][i]['text']}" for i in targets)
+        return f"""Repair review for epic #{self.a.parent}. The epic review stayed blocked after its fix tickets, and a person then
+committed fixes on the epic branch. Review only their commits: git diff {rv['fixHead']}..HEAD and git log
+{rv['fixHead']}..HEAD. The epic review so far is at {self.folder / 'review' / 'report.md'}.
+## FIXES: each of these blocking findings exactly once: - {targets[0]} FIXED <evidence>, or - {targets[0]} NOT FIXED <evidence>.
+IDs: {', '.join(targets)}
+{listed}
+## FINDINGS: only problems these commits themselves introduced, numbered on from {r['letter']}{max(used, default=0) + 1}, in
+the same shape as before: BLOCKING for a defect the commits caused, DEFERRED for anything else you notice. Code
+these commits did not change is out of scope, however long it has been there. Write "None." when there are none.
+{self.read_only}End with exactly one line: REPAIR=DONE
+"""
+
     def repair_review_prompt(self, wt, tip, vdir):
         return f"""You are the repair reviewer for epic #{self.a.parent}. The epic review said SHIP at {tip}; the verify stage
 then failed, and its repair committed a fix in this worktree ({wt}). Review only that repair: git diff
