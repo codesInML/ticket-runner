@@ -5,7 +5,7 @@ import subprocess
 
 from .display import say
 from .github import gh_json
-from .processes import attempt, command, dirty, git
+from .processes import attempt, command, dirty, git, remote
 from .settings import BLUE, BOLD, CONFIG, DIM, GREEN, RETRYABLE
 from .text import empty, section
 
@@ -106,13 +106,13 @@ Read-only: do not edit files, commit, change branches, push, open pull requests,
     def push(self, rec):
         """Push the epic branch; never over commits the remote has that the epic lacks."""
         branch = self.epic
-        remote = attempt(self.root, "ls-remote", "--exit-code", "--heads", "origin", branch)
-        if remote.returncode not in (0, 2):
-            self.epic_fail(rec, "needs-human", f"could not read origin: {remote.stderr.strip()}")
+        heads = remote(self.root, "ls-remote", "--exit-code", "--heads", "origin", branch)
+        if heads.returncode not in (0, 2):
+            self.epic_fail(rec, "needs-human", f"could not read origin: {heads.stderr.strip()}")
             return False
-        if remote.returncode == 0:
-            theirs = remote.stdout.split()[0]
-            fetched = attempt(self.root, "fetch", "-q", "origin", f"refs/heads/{branch}")
+        if heads.returncode == 0:
+            theirs = heads.stdout.split()[0]
+            fetched = remote(self.root, "fetch", "-q", "origin", f"refs/heads/{branch}")
             if fetched.returncode:
                 self.epic_fail(rec, "needs-human", f"could not fetch origin/{branch}: {fetched.stderr.strip()}")
                 return False
@@ -121,7 +121,7 @@ Read-only: do not edit files, commit, change branches, push, open pull requests,
                                "them by hand (the runner never force-pushes), then --epic-only")
                 return False
         say(f"Pushing {branch} to origin", BOLD)
-        pushed = attempt(self.root, "push", "-u", "origin", branch)
+        pushed = remote(self.root, "push", "-u", "origin", branch)
         if pushed.returncode:
             self.epic_fail(rec, "needs-human", f"git push failed: {pushed.stderr.strip()}")
             return False

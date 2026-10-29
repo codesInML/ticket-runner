@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import subprocess
+import time
 
 
 def command(*args, cwd=None):
@@ -18,6 +19,19 @@ def git(cwd, *args):
 
 def attempt(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+
+OFFLINE = re.compile(r"unable to access|could not resolve host|failed to connect|couldn't connect|"
+                     r"connection (?:timed out|reset|refused)|operation timed out|early eof|the remote end hung up", re.I)
+
+
+def remote(cwd, *args, waits=(5, 15, 30)):
+    """attempt() for a command that talks to the remote, retried while the network is down."""
+    for wait in (*waits, None):
+        result = attempt(cwd, *args)
+        if not result.returncode or wait is None or not OFFLINE.search(result.stderr):
+            return result
+        time.sleep(wait)
 
 
 def dirty(cwd):

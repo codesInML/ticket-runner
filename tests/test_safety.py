@@ -10,12 +10,31 @@ import unittest
 from unittest.mock import patch
 
 from ticket_runner_lib.github import native_links
-from ticket_runner_lib.processes import kill, probe
+from ticket_runner_lib.processes import kill, probe, remote
 from ticket_runner_lib.verification import Verification
 from types import SimpleNamespace
 
 
 class SafetyTests(unittest.TestCase):
+    def test_remote_git_retries_only_while_the_network_is_down(self):
+        offline = subprocess.CompletedProcess([], 128, "", "fatal: unable to access 'https://github.com/o/r.git/': "
+                                              "Failed to connect to github.com port 443: Couldn't connect to server")
+        online = subprocess.CompletedProcess([], 0, "abc\trefs/heads/x\n", "")
+        missing = subprocess.CompletedProcess([], 2, "", "")
+        with patch("ticket_runner_lib.processes.subprocess.run", side_effect=[offline, offline, online]) as run, \
+                patch("ticket_runner_lib.processes.time.sleep") as sleep:
+            self.assertIs(remote("/repo", "ls-remote", "origin"), online)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 15])
+        with patch("ticket_runner_lib.processes.subprocess.run", side_effect=[missing]) as run, \
+                patch("ticket_runner_lib.processes.time.sleep") as sleep:
+            self.assertIs(remote("/repo", "ls-remote", "--exit-code", "origin"), missing)
+        sleep.assert_not_called()
+        with patch("ticket_runner_lib.processes.subprocess.run", return_value=offline) as run, \
+                patch("ticket_runner_lib.processes.time.sleep"):
+            self.assertIs(remote("/repo", "push", "origin"), offline)
+        self.assertEqual(run.call_count, 4)
+
     def test_nested_checkpoints_and_verification_keep_items_but_skip_code(self):
         verification = Verification()
         verification.a = SimpleNamespace(parent=207)
