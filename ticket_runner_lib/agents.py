@@ -28,7 +28,7 @@ class AgentProcesses:
     def run_agent(self, model, effort, turns, prompt, folder, record, session=None, cwd=None,
                   tag="review", color=BLUE, browser=False, stage="implement"):
         """One agent session on the run's backend; its final text. `stage` names its cost and its budget."""
-        cwd = cwd or self.root
+        cwd = cwd or self.tree
         instructions = self.codex_snapshot(cwd) if self.backend.name == "codex" else None
         folder.mkdir(parents=True, exist_ok=True)
         if session and record.get("backend", "commandcode") != self.backend.name:

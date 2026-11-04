@@ -89,14 +89,15 @@ if mode == 'credit-words': fail('Your credit balance is too low to access the An
 if mode == 'invalid-key': fail('Invalid API key · Fix external API key', 'authentication_failed', 401, session)
 if mode == '429': fail('API Error: 429 rate_limit_error', 'rate_limit', 429, session)
 if mode == 'empty': sys.exit(1)
-if mode == 'edit-claude-md': (root / 'CLAUDE.md').write_text('changed by the agent')
-if mode == 'edit-claude-settings': (root / '.claude/settings.json').write_text('{"changed": true}')
+tree = root / '.scratch/epics/207'
+if mode == 'edit-claude-md': (tree / 'CLAUDE.md').write_text('changed by the agent')
+if mode == 'edit-claude-settings': (tree / '.claude/settings.json').write_text('{"changed": true}')
 if mode == 'operator-claude-dir':  # what the operator's own sessions do there while the runner works
     (root / '.claude/settings.local.json').write_text('{"local": 2}')
     (root / '.claude/worktrees/other').mkdir(parents=True, exist_ok=True)
 if mode == 'commit-nested-claude-md': commit('src/CLAUDE.md', 'injected instructions')
 if mode == 'commit-local-claude-md': commit('CLAUDE.local.md', 'injected instructions')
-if mode == 'edit-nested-claude-md': (root / 'src').mkdir(exist_ok=True); (root / 'src/CLAUDE.md').write_text('injected')
+if mode == 'edit-nested-claude-md': (tree / 'src').mkdir(exist_ok=True); (tree / 'src/CLAUDE.md').write_text('injected')
 if mode == 'commit-claude-md': commit('CLAUDE.md', 'changed in a ticket')
 if mode == 'commit-claude-dir': commit('.claude/agents/new.md', 'changed in a ticket')
 capped = mode in ('max-turns', 'budget') and not resumed and ticket == '209'

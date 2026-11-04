@@ -97,9 +97,15 @@ class Verification:
     def verify_branch(self):
         return f"cc/{self.a.parent}/verify"
 
+    def verify_path(self, rec):
+        """One verify worktree per epic, so epics can run at once; a kept one from before that stays where it is."""
+        legacy = self.worktrees / "verify"
+        return legacy if rec.get("worktree") == str(legacy) and legacy.exists() else \
+            self.worktrees / f"verify-{self.a.parent}"
+
     def verify_worktree(self, rec, tip):
         """The verify worktree at the epic tip; a kept one (after needs-human) is reused with its fixes."""
-        branch, wt = self.verify_branch(), self.worktrees / "verify"
+        branch, wt = self.verify_branch(), self.verify_path(rec)
         created = not wt.exists()
         if created:
             self.worktrees.mkdir(parents=True, exist_ok=True)
@@ -381,17 +387,17 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
                                       f"{os.path.relpath(wt)}, then --epic-only")
             with self.integration:
                 self.check_main()
-                git(self.root, "merge", "-q", "--ff-only", branch)
+                git(self.tree, "merge", "-q", "--ff-only", branch)
                 self.guard()
             say(f"Verified fixes merged into {self.epic} (now {head[:8]})", GREEN, BOLD)
-            if self.lock_changed(self.root, tip, head):
-                say(f"a lockfile changed; running {self.install_cmd} in the main worktree", BOLD)
-                if subprocess.run(self.install_cmd, shell=True, cwd=self.root).returncode:
-                    raise Fatal(f"{self.install_cmd} failed in the main worktree after the verify repair")
+            if self.lock_changed(self.tree, tip, head):
+                say(f"a lockfile changed; running {self.install_cmd} in {os.path.relpath(self.tree)}", BOLD)
+                if subprocess.run(self.install_cmd, shell=True, cwd=self.tree).returncode:
+                    raise Fatal(f"{self.install_cmd} failed in {os.path.relpath(self.tree)} after the verify repair")
         self.update(rec, status="pass", head=head, fingerprint=self.verify_fingerprint(head), ran=True, phase=None, drop=("reason",))
         try:
             git(self.root, "worktree", "remove", "--force", str(wt))
-            git(self.root, "branch", "-q", "-d", branch)
+            git(self.tree, "branch", "-q", "-d", branch)
         except subprocess.CalledProcessError as exc:
             say(f"Verify passed, but removing {os.path.relpath(wt)} failed ({exc}); remove it by hand", YELLOW)
         return 0

@@ -11,24 +11,29 @@ from .settings import BOLD, CLONES, Fatal, GREEN, RED, RETRYABLE, Stop, YELLOW
 from .text import verdict
 
 
+def provision_tree(root, source_tree, wt, cfg):
+    """Dependencies cloned from source_tree, which keeps them current; link files always from the operator's folder."""
+    for name in cfg["dependencyDirs"]:
+        source, target = source_tree / name, wt / name
+        if not source.is_dir() or target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        for clone in CLONES:
+            if not subprocess.run([*clone, str(source), str(target)], capture_output=True).returncode:
+                break
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            raise RuntimeError(f"Could not copy {name} into {wt}")
+    for name in cfg["linkFiles"]:
+        source, target = root / name, wt / name
+        if source.exists() and not os.path.lexists(target):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(source)
+
+
 class WorktreeIntegration:
     def provision(self, wt):
-        for name in self.cfg["dependencyDirs"]:
-            source, target = self.root / name, wt / name
-            if not source.is_dir() or target.exists():
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            for clone in CLONES:
-                if not subprocess.run([*clone, str(source), str(target)], capture_output=True).returncode:
-                    break
-                shutil.rmtree(target, ignore_errors=True)
-            else:
-                raise RuntimeError(f"Could not copy {name} into {wt}")
-        for name in self.cfg["linkFiles"]:
-            source, target = self.root / name, wt / name
-            if source.exists() and not os.path.lexists(target):
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.symlink_to(source)
+        provision_tree(self.root, self.tree, wt, self.cfg)
 
     def check_worktree(self, wt, branch):
         if git(wt, "branch", "--show-current") != branch:
@@ -124,16 +129,16 @@ or modify the runner or {self.hands_off}.
             return self.fail(n, record, "needs-human", f"the ticket changed protected files ({', '.join(touched.split())}); "
                              "revert those commits, then --resume")
         self.check_main()
-        git(self.root, "merge", "-q", "--ff-only", branch)
+        git(self.tree, "merge", "-q", "--ff-only", branch)
         self.guard()
-        head = git(self.root, "rev-parse", "HEAD")
+        head = git(self.tree, "rev-parse", "HEAD")
         self.finish(n, record, head)
-        count = git(self.root, "rev-list", "--count", f"{tip}..{head}")
+        count = git(self.tree, "rev-list", "--count", f"{tip}..{head}")
         say(f"#{n} merged into {self.epic} ({count} commit{'s' * (count != '1')}, now {head[:8]})", GREEN, BOLD)
-        if self.lock_changed(self.root, tip, head):
-            say(f"a lockfile changed; running {self.install_cmd} in the main worktree", BOLD)
-            if subprocess.run(self.install_cmd, shell=True, cwd=self.root).returncode:
-                raise Fatal(f"{self.install_cmd} failed in the main worktree after merging #{n}; "
+        if self.lock_changed(self.tree, tip, head):
+            say(f"a lockfile changed; running {self.install_cmd} in {os.path.relpath(self.tree)}", BOLD)
+            if subprocess.run(self.install_cmd, shell=True, cwd=self.tree).returncode:
+                raise Fatal(f"{self.install_cmd} failed in {os.path.relpath(self.tree)} after merging #{n}; "
                             "fix dependencies there, then --resume")
         self.cleanup(n)
 
@@ -152,7 +157,7 @@ or modify the runner or {self.hands_off}.
                     return say(f"#{n} done, but {os.path.relpath(wt)} has uncommitted changes; left in place", YELLOW)
                 git(self.root, "worktree", "remove", "--force", str(wt))
             if not attempt(self.root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").returncode:
-                git(self.root, "branch", "-q", "-d", branch)
+                git(self.tree, "branch", "-q", "-d", branch)  # -d checks it merged into the epic branch
         except (subprocess.CalledProcessError, OSError) as exc:
             say(f"#{n} done, but removing its worktree/branch failed ({exc}); the next run retries", YELLOW)
 

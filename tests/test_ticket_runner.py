@@ -274,7 +274,7 @@ if mode in ('no-change', 'no-change-dirty') and Path.cwd().name == '209':
 if os.environ.get('PROBE'):
     with open(os.environ['PROBE'], 'a') as f:
         f.write(json.dumps({'link': os.path.islink('local.cfg'), 'deps': os.path.exists('deps/lib.txt')}) + '\\n')
-if mode == 'edit-config': Path(os.environ['ROOT'], '.agents/ticket-runner.json').write_text('{}')
+if mode == 'edit-config': Path(os.environ['ROOT'], '.scratch/epics/207/.agents/ticket-runner.json').write_text('{}')
 if mode == 'commit-config':
     Path('.agents/ticket-runner.json').write_text('{"gate": ["false"]}')
     subprocess.run(['git', 'add', '.agents/ticket-runner.json'], check=True)
@@ -330,13 +330,32 @@ sys.exit(8 if cap else 0)
         path.write_text("#!/usr/bin/env python3\n" + source)
         path.chmod(0o755)
 
+    def checkout(self):
+        """Where the epic branch is checked out: its worktree during a run's life, else the main folder."""
+        tree = self.root / ".scratch/epics/207"
+        return tree if tree.is_dir() else self.root
+
     def git(self, *args):
-        return subprocess.check_output(["git", *args], cwd=self.root, text=True, stderr=subprocess.DEVNULL).strip()
+        return subprocess.check_output(["git", *args], cwd=self.checkout(), text=True, stderr=subprocess.DEVNULL).strip()
+
+    def free_main_folder(self):
+        """A person hands the epic branch over; the helpers here keep it checked out between runs to inspect it."""
+        branch = subprocess.run(["git", "branch", "--show-current"], cwd=self.root, capture_output=True, text=True)
+        if branch.stdout.strip() == "test":
+            subprocess.run(["git", "switch", "-q", "--detach"], cwd=self.root, capture_output=True)
+            self.freed = True
+
+    def argv(self, *args, script="ticket-runner"):
+        return [str(RUNNER / "bin" / script), "207", *([] if "--branch" in args else ["--branch", "test"]), *args]
 
     def run_script(self, *args, mode="success", script="ticket-runner"):
         env = dict(self.env, ISSUES=json.dumps(self.issues), MODE=mode)
-        return subprocess.run([str(RUNNER / "bin" / script), "207", *args],
-                              cwd=self.root, env=env, capture_output=True, text=True)
+        self.free_main_folder()
+        result = subprocess.run(self.argv(*args, script=script), cwd=self.root, env=env, capture_output=True, text=True)
+        if getattr(self, "freed", False) and self.checkout() == self.root:
+            subprocess.run(["git", "switch", "-q", "test"], cwd=self.root, capture_output=True)
+            self.freed = False
+        return result
 
     def run_osmani(self, *args, mode="success"):
         return self.run_script(*args, mode=mode, script="ticket-runner-osmani")
@@ -346,9 +365,9 @@ sys.exit(8 if cap else 0)
         self.issues[1]["body"] = planned("Second slice", blocked_by="#209")
 
     def configure(self, commit=True, **config):
-        (self.root / ".agents").mkdir(exist_ok=True)
+        (self.checkout() / ".agents").mkdir(exist_ok=True)
         config.setdefault('gate', ['true'])
-        (self.root / ".agents/ticket-runner.json").write_text(json.dumps(config))
+        (self.checkout() / ".agents/ticket-runner.json").write_text(json.dumps(config))
         if commit:
             self.git("add", ".agents/ticket-runner.json")
             if self.git("diff", "--cached", "--name-only"):
@@ -552,14 +571,267 @@ sys.exit(8 if cap else 0)
         self.assertEqual(result.returncode, 1)
         self.assertFalse((self.root / 'agents.log').exists())
 
-    def test_dirty_tree_is_preserved_and_invalid_budget_rejected(self):
+    def test_a_dirty_main_folder_is_left_alone_and_invalid_budget_rejected(self):
         (self.root / 'unrelated.txt').write_text('user work')
-        result = self.run_script()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('Dirty main worktree', result.stderr)
+        result = self.run_script('--no-epic-review')
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / 'unrelated.txt').read_text(), 'user work')
-        self.assertFalse((self.root / 'agents.log').exists())
         self.assertEqual(self.run_script('--max-turns', '0').returncode, 2)
+
+    def test_a_dirty_epic_worktree_is_preserved_and_refused(self):
+        self.assertEqual(self.run_script('--only', '209').returncode, 0)
+        (self.checkout() / 'unrelated.txt').write_text('user work')
+        result = self.run_script('--only', '210')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Dirty .scratch/epics/207', result.stderr)
+        self.assertEqual((self.checkout() / 'unrelated.txt').read_text(), 'user work')
+        self.assertEqual(len(self.calls()), 1)
+
+    # ── epic branch and epic worktree ────────────────────────────────────
+
+    def publish_main(self):
+        """origin gets a `main` the local copy has fallen behind."""
+        self.git('branch', 'main')
+        self.git('push', '-q', 'origin', 'main')
+        other = self.origin.parent / 'other'
+        subprocess.run(['git', 'clone', '-q', '-b', 'main', str(self.origin), str(other)], check=True)
+        (other / 'latest.txt').write_text('latest')
+        for args in (['add', 'latest.txt'], ['-c', 'user.email=x@y', '-c', 'user.name=X', 'commit', '-qm', 'Latest'],
+                     ['push', '-q', 'origin', 'main']):
+            subprocess.run(['git', *args], cwd=other, check=True)
+        return other
+
+    def show(self, ref, path):
+        return subprocess.run(['git', 'show', f'{ref}:{path}'], cwd=self.root, capture_output=True, text=True)
+
+    def test_branch_is_required_on_the_first_run_then_saved(self):
+        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success')
+        self.free_main_folder()
+        bare = [str(RUNNER / 'bin/ticket-runner'), '207', '--no-epic-review']
+        result = subprocess.run(bare, cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('--branch is required', result.stderr)
+        self.assertFalse((self.root / 'agents.log').exists())
+        result = subprocess.run([*bare, '--dry-run'], cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('A real run would refuse: --branch is required', result.stderr)
+        self.git('branch', 'feat/x')
+        self.assertEqual(self.run_script('--only', '209', '--branch', 'feat/x').returncode, 0)
+        self.assertEqual(self.state()['_meta']['branch'], 'feat/x')
+        again = subprocess.run([*bare, '--only', '210'], cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        result = self.run_script('--only', '210', '--branch', 'feat/other')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('merges into feat/x, not feat/other', result.stderr)
+
+    def test_new_branch_starts_from_the_latest_target_on_origin_and_tickets_merge_into_it(self):
+        self.publish_main()
+        self.git('switch', '-q', 'main')  # Local main is behind, and the runner leaves this folder alone.
+        before = self.git('rev-parse', 'HEAD')
+        result = self.run_script('--no-epic-review', '--branch', 'feat/payments')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('feat/payments created from main', result.stdout)
+        self.assertEqual(self.show('feat/payments', 'latest.txt').stdout, 'latest')
+        self.assertEqual(self.show('feat/payments', 'work.txt').returncode, 0)
+        self.assertEqual(self.git('branch', '--show-current'), 'main')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), before)
+        self.assertFalse((self.root / 'work.txt').exists())
+        self.assertEqual(self.state()['_meta']['prBase'], 'main')
+
+    def test_from_starts_the_branch_there_and_becomes_the_pull_request_target(self):
+        self.git('branch', 'feat/payments')
+        result = self.run_script('--branch', 'feat/refunds', '--from', 'feat/payments')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [pr] = self.prs()
+        self.assertEqual((pr['head'], pr['base']), ('feat/refunds', 'feat/payments'))
+        self.assertEqual(self.state()['_meta']['from'], 'feat/payments')
+        self.assertEqual(self.run_script('--epic-only', '--branch', 'feat/refunds', '--from', 'feat/payments').returncode, 0)
+
+    def test_pr_base_names_the_target_and_a_new_branch_starts_there(self):
+        self.git('branch', 'develop')
+        self.git('push', '-q', 'origin', 'develop')
+        result = self.run_script('--branch', 'feat/x', '--pr-base', 'develop')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('feat/x created from develop', result.stdout)
+        self.assertEqual(self.prs()[0]['base'], 'develop')
+        result = self.run_script('--epic-only', '--pr-base', 'other')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("pull request goes to develop, not other", result.stderr)
+
+    def test_pr_base_outranks_from_which_outranks_the_config(self):
+        self.configure(prBase='config-target')
+        self.git('branch', 'feat/start')
+        self.assertIn('pull request into feat/start', self.run_script(
+            '--dry-run', '--branch', 'feat/x', '--from', 'feat/start').stdout)
+        self.assertIn('pull request into named', self.run_script(
+            '--dry-run', '--branch', 'feat/x', '--from', 'feat/start', '--pr-base', 'named').stdout)
+        self.assertIn('pull request into config-target', self.run_script('--dry-run', '--branch', 'feat/x').stdout)
+
+    def test_from_is_refused_on_a_branch_that_already_exists(self):
+        self.git('branch', 'feat/x')
+        self.git('branch', 'feat/start')
+        result = self.run_script('--branch', 'feat/x', '--from', 'feat/start')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('--from feat/start cannot apply: feat/x already exists', result.stderr)
+
+    def test_a_branch_only_on_origin_gets_a_local_copy_and_one_that_is_behind_catches_up(self):
+        other = self.publish_main()
+        subprocess.run(['git', 'push', '-q', 'origin', 'main:refs/heads/feat/remote'], cwd=other, check=True)
+        result = self.run_script('--no-epic-review', '--branch', 'feat/remote')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('feat/remote created from origin', result.stdout)
+        self.assertEqual(self.show('feat/remote', 'latest.txt').stdout, 'latest')
+        (self.root / '.scratch/run-tickets-commandcode/207/state.json').unlink()
+        self.git('branch', 'feat/behind', 'test')
+        subprocess.run(['git', 'push', '-q', 'origin', 'main:refs/heads/feat/behind'], cwd=other, check=True)
+        self.assertEqual(self.run_script('--dry-run', '--branch', 'feat/behind').returncode, 0)
+        self.assertEqual(self.show('feat/behind', 'latest.txt').returncode, 128)  # A dry run changes nothing.
+        self.assertEqual(self.run_script('--no-epic-review', '--branch', 'feat/behind').returncode, 0)
+        self.assertEqual(self.show('feat/behind', 'latest.txt').stdout, 'latest')
+
+    def test_a_branch_that_moved_on_both_here_and_on_origin_is_refused(self):
+        other = self.publish_main()
+        subprocess.run(['git', 'push', '-q', 'origin', 'main:refs/heads/feat/both'], cwd=other, check=True)
+        self.git('branch', 'feat/both', 'test')  # Origin's copy has `latest.txt`; this one gets its own commit.
+        self.git('switch', '-q', 'feat/both')
+        (self.root / 'mine.txt').write_text('mine')
+        self.git('add', 'mine.txt')
+        self.git('commit', '-qm', 'Mine')
+        self.git('switch', '-q', 'test')
+        result = self.run_script('--branch', 'feat/both')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('have both moved on', result.stderr)
+        self.assertFalse((self.root / 'agents.log').exists())
+
+    def test_a_new_branch_needs_its_target_on_origin_and_a_reachable_origin(self):
+        result = self.run_script('--branch', 'feat/new')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('pull request target main is not on origin', result.stderr)
+        self.git('remote', 'set-url', 'origin', str(self.origin) + '-missing')
+        result = self.run_script('--branch', 'feat/new')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('could not read origin', result.stderr)
+        self.assertEqual(self.git('branch', '--list', 'feat/new'), '')
+
+    def test_the_branch_cannot_also_be_the_pull_request_target(self):
+        result = self.run_script('--branch', 'test', '--pr-base', 'test')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('is the pull request target too', result.stderr)
+
+    def test_a_branch_checked_out_elsewhere_is_refused_until_that_folder_moves_off_it(self):
+        self.assertEqual(self.run_script('--only', '209').returncode, 0)
+        subprocess.run(['git', 'worktree', 'remove', '--force', str(self.checkout())], cwd=self.root, check=True)
+        self.git('switch', '-q', 'test')  # As an epic from before epic worktrees would have it.
+        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success')
+        result = subprocess.run(self.argv('--resume', '--no-epic-review'), cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('test is checked out in', result.stderr)
+        self.assertIn('git switch', result.stderr)
+        self.assertEqual(len(self.calls()), 1)
+        self.git('switch', '-q', '--detach')
+        result = self.run_script('--resume', '--no-epic-review')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()['209']['status'], 'done')
+        self.assertEqual(self.state()['210']['status'], 'done')
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_a_ticket_in_progress_before_the_upgrade_continues_in_its_own_worktree(self):
+        self.assertEqual(self.run_script(mode='cap').returncode, 1)
+        subprocess.run(['git', 'worktree', 'remove', '--force', str(self.checkout())], cwd=self.root, check=True)
+        self.git('switch', '-q', 'test')
+        refused = subprocess.run(self.argv('--resume'), cwd=self.root, capture_output=True, text=True,
+                                 env=dict(self.env, ISSUES=json.dumps(self.issues), MODE='cap'))
+        self.assertIn('checked out in', refused.stderr)
+        self.git('switch', '-q', '--detach')
+        result = self.run_script('--resume', '--no-epic-review')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        resumed = self.calls()[1]
+        self.assertEqual(resumed[resumed.index('--resume')+1], 'ticket-session')
+
+    def test_the_epic_worktree_goes_when_the_run_succeeds(self):
+        tree = self.root / '.scratch/epics/207'
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertFalse(tree.exists())
+        self.assertEqual(self.git('branch', '--list', 'test'), '* test')  # The branch itself stays.
+        (self.root / '.scratch/run-tickets-commandcode/207/state.json').read_text()
+        self.assertEqual(self.run_script('--epic-only').returncode, 0)  # A later run recreates it, and frees it again.
+        self.assertFalse(tree.exists())
+        self.assertEqual(len(self.calls()), 6)
+
+    def test_the_epic_worktree_also_goes_after_a_passing_run_without_a_ship(self):
+        self.assertEqual(self.run_script('--no-ship').returncode, 0)
+        self.assertFalse((self.root / '.scratch/epics/207').exists())
+        self.assertIsNone(self.remote_head())
+
+    def test_the_epic_worktree_stays_for_only_and_for_failure(self):
+        tree = self.root / '.scratch/epics/207'
+        self.assertEqual(self.run_script('--only', '209').returncode, 0)
+        self.assertTrue(tree.is_dir())
+        self.assertEqual(self.run_script('--only', '210', mode='cap').returncode, 1)
+        self.assertTrue(tree.is_dir())
+
+    def test_the_epic_worktree_stays_while_it_holds_uncommitted_changes(self):
+        self.configure(gate=['true'], verify=['touch "$ROOT/.scratch/epics/207/stray.txt"'])
+        result = self.run_script('--no-ship')
+        self.assertEqual(self.state()['_verify']['status'], 'pass', result.stderr + result.stdout)
+        self.assertIn('has uncommitted changes; left in place', result.stdout)
+        self.assertTrue((self.root / '.scratch/epics/207/stray.txt').exists())
+
+    def test_two_epics_run_at_once_in_one_checkout(self):
+        def other_epic(env):
+            issues = [{"number": 509, "title": "Other", "body": "Parent #507", "state": "OPEN"}]
+            return subprocess.Popen([str(RUNNER / 'bin/ticket-runner'), '507', '--branch', 'feat/other', '--no-epic-review',
+                                     '--pr-base', 'test'], cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, env=dict(env, ISSUES=json.dumps(issues), MODE='success'))
+        self.git('push', '-q', 'origin', 'test')
+        self.free_main_folder()
+        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success', DISCOVERY_DELAY='1')
+        first = subprocess.Popen(self.argv('--no-epic-review', '--branch', 'feat/one', '--pr-base', 'test'), cwd=self.root,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        second = other_epic(env)
+        self.addCleanup(lambda: [p.kill() for p in (first, second) if p.poll() is None])
+        for runner in (first, second):
+            _, errors = runner.communicate(timeout=60)
+            self.assertEqual(runner.returncode, 0, errors)
+        self.assertEqual(self.show('feat/one', 'work.txt').returncode, 0)
+        self.assertEqual(self.show('feat/other', 'work.txt').returncode, 0)
+        self.assertEqual(self.git('rev-parse', 'feat/one~2'), self.git('rev-parse', 'test'))
+        self.assertEqual(self.git('rev-parse', 'feat/other~1'), self.git('rev-parse', 'test'))
+
+    def test_an_older_runner_in_this_checkout_is_refused_until_it_ends(self):
+        import fcntl
+        lock = self.root / '.scratch/run-tickets-commandcode/.lock'
+        lock.parent.mkdir(parents=True)
+        (self.root / '.scratch/.gitignore').write_text('*\n')
+        with lock.open('a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            result = self.run_script('--no-epic-review')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('An older ticket runner is active', result.stderr)
+        self.assertFalse((self.root / 'agents.log').exists())
+        self.assertEqual(self.run_script('--no-epic-review').returncode, 0)
+
+    def test_a_running_epic_keeps_an_older_runner_out(self):
+        import fcntl, time
+        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success', DISCOVERY_DELAY='1')
+        self.free_main_folder()
+        runner = subprocess.Popen(self.argv('--no-epic-review'), cwd=self.root, env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: runner.kill() if runner.poll() is None else None)
+        deadline = time.monotonic() + 5
+        while not (self.root / 'discovery.log').exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        with (self.root / '.scratch/run-tickets-commandcode/.lock').open('a') as held:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        runner.communicate(timeout=30)
+
+    def test_a_runner_made_worktree_is_not_a_place_to_run_from(self):
+        self.assertEqual(self.run_script('--only', '209').returncode, 0)
+        result = subprocess.run(self.argv('--only', '210'), cwd=self.checkout(), capture_output=True, text=True,
+                                env=dict(self.env, ISSUES=json.dumps(self.issues), MODE='success'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("run this from the project's own folder", result.stderr)
 
     # ── osmani workflow ──────────────────────────────────────────────────
 
@@ -904,7 +1176,7 @@ sys.exit(8 if cap else 0)
         self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
         self.assertEqual(self.state()['_verify']['unexpectedUntracked'], ['stray-source.py'])
         self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
-        self.assertTrue((self.root / '.scratch/worktrees/verify/stray-source.py').exists())
+        self.assertTrue((self.root / '.scratch/worktrees/verify-207/stray-source.py').exists())
         self.assertIn('unexpected uncommitted files remain', self.state()['_verify']['reason'])
 
     def test_human_commits_in_kept_verify_worktree_require_gate(self):
@@ -916,7 +1188,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.run_script('--no-verify', '--no-epic-review').returncode, 0)
         self.env.pop('GATE_CMDS')
         self.assertNotEqual(self.run_script('--epic-only', '--no-ship', mode='verifier-missing').returncode, 0)
-        wt = self.root / '.scratch/worktrees/verify'
+        wt = self.root / '.scratch/worktrees/verify-207'
         with (wt / 'README.md').open('a') as out: out.write('human fix\n')
         subprocess.run(['git', 'add', 'README.md'], cwd=wt, check=True)
         subprocess.run(['git', 'commit', '-qm', 'Human fix'], cwd=wt, check=True)
@@ -931,7 +1203,7 @@ sys.exit(8 if cap else 0)
         self.git('add', '.gitignore'); self.git('commit', '-qm', 'Ignore local env')
         self.configure(verify=['false'])
         self.assertNotEqual(self.run_script('--no-ship').returncode, 0)
-        link = self.root / '.scratch/worktrees/verify/.env'
+        link = self.root / '.scratch/worktrees/verify-207/.env'
         link.unlink(); link.write_text('tampered')
         self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
         self.assertEqual(link.read_text(), 'tampered')
@@ -966,14 +1238,15 @@ sys.exit(8 if cap else 0)
 
     def test_checkout_lock_precedes_discovery_and_state_snapshot(self):
         env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success', DISCOVERY_DELAY='1')
-        slow = subprocess.Popen([str(RUNNER / 'bin/ticket-runner'), '207', '--no-epic-review'],
+        self.free_main_folder()
+        slow = subprocess.Popen(self.argv('--no-epic-review'),
                                 cwd=self.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: slow.kill() if slow.poll() is None else None)
         import time
         deadline = time.monotonic() + 5
         while not (self.root / 'discovery.log').exists() and time.monotonic() < deadline:
             time.sleep(.02)
-        fast = self.run_script('--no-epic-review')
+        fast = subprocess.run(self.argv('--no-epic-review'), cwd=self.root, env=env, capture_output=True, text=True)
         self.assertNotEqual(fast.returncode, 0)
         self.assertIn('Another ticket runner is active', fast.stderr)
         _, errors = slow.communicate(timeout=20)
@@ -983,13 +1256,14 @@ sys.exit(8 if cap else 0)
     def test_interrupt_during_verification_stops_shell_and_descendants(self):
         self.configure(verify=['echo $$ > command.pid; sleep 60'])
         env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success')
-        runner = subprocess.Popen([str(RUNNER / 'bin/ticket-runner'), '207', '--no-ship'],
+        self.free_main_folder()
+        runner = subprocess.Popen(self.argv('--no-ship'),
                                   cwd=self.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: runner.kill() if runner.poll() is None else None)
         import signal, time
-        marker = self.root / '.scratch/worktrees/verify/command.pid'
+        marker = self.root / '.scratch/worktrees/verify-207/command.pid'
         deadline = time.monotonic() + 15
-        while not marker.exists() and time.monotonic() < deadline:
+        while not (marker.exists() and marker.read_text().strip()) and time.monotonic() < deadline:
             time.sleep(.02)
         self.assertTrue(marker.exists())
         child = int(marker.read_text())
@@ -1002,17 +1276,17 @@ sys.exit(8 if cap else 0)
         self.configure(verify=['echo new > new-uncommitted.txt'])
         result = self.run_script('--no-ship')
         self.assertNotEqual(result.returncode, 0)
-        self.assertTrue((self.root / '.scratch/worktrees/verify/new-uncommitted.txt').exists())
+        self.assertTrue((self.root / '.scratch/worktrees/verify-207/new-uncommitted.txt').exists())
         self.assertEqual(self.state()['_verify']['status'], 'needs-human')
         self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
-        self.assertTrue((self.root / '.scratch/worktrees/verify/new-uncommitted.txt').exists())
+        self.assertTrue((self.root / '.scratch/worktrees/verify-207/new-uncommitted.txt').exists())
 
     def test_verify_commands_cannot_mutate_tracked_code(self):
         self.configure(verify=["echo changed >> README.md"])
         result = self.run_script('--no-ship')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.state()['_verify']['status'], 'needs-human')
-        self.assertTrue((self.root / '.scratch/worktrees/verify/README.md').read_text().endswith('changed\n'))
+        self.assertTrue((self.root / '.scratch/worktrees/verify-207/README.md').read_text().endswith('changed\n'))
         self.assertEqual((self.root / 'README.md').read_text(), 'Project\n')
 
     def test_failed_verify_repair_gate_is_retried_on_resume(self):
@@ -1039,7 +1313,7 @@ sys.exit(8 if cap else 0)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.state()['_verify']['status'], 'needs-human')
         self.assertEqual(self.state()['_verify']['unexpectedUntracked'], ['new-runtime-output.txt'])
-        artifact = self.root / '.scratch/worktrees/verify/new-runtime-output.txt'
+        artifact = self.root / '.scratch/worktrees/verify-207/new-runtime-output.txt'
         self.assertEqual(artifact.read_text(), 'created during checks')
         self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
         self.assertTrue(artifact.exists())
@@ -1117,7 +1391,7 @@ sys.exit(8 if cap else 0)
         self.assertIn('skipped: no `serve`', report)
         self.assertNotIn(str(self.verify_dir() / 'report.md'), self.prompt(self.call('epic review')))
         self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'launch plan'])
-        self.assertFalse((self.root / '.scratch/worktrees/verify').exists())
+        self.assertFalse((self.root / '.scratch/worktrees/verify-207').exists())
         self.assertEqual(self.git('branch', '--list', 'cc/207/verify'), '')
 
     def test_verify_failure_gets_one_repair_then_re_verifies_and_fast_forwards(self):
@@ -1157,7 +1431,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(state['_review']['status'], 'ship')
         self.assertNotIn('_ship', state)
         self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'repair'])
-        wt = self.root / '.scratch/worktrees/verify'
+        wt = self.root / '.scratch/worktrees/verify-207'
         self.assertTrue((wt / 'other.txt').exists())
         self.assertFalse((self.root / 'other.txt').exists())
         self.assertIn(['issue', 'edit', '207', '--add-label', 'needs-human', '--remove-label', 'in-progress'],
@@ -1222,7 +1496,7 @@ sys.exit(8 if cap else 0)
         self.assertIn('The app did not start for the runtime checks', self.prompt(self.call('repair')))
         self.assertEqual(self.state()['_verify']['status'], 'needs-human')
         self.assertIn('still fails after one repair', self.state()['_verify']['reason'])
-        pid = int((self.root / '.scratch/worktrees/verify/app.pid').read_text())
+        pid = int((self.root / '.scratch/worktrees/verify-207/app.pid').read_text())
         with self.assertRaises(ProcessLookupError):  # The whole process group was stopped.
             os.kill(pid, 0)
 
@@ -1325,6 +1599,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.remote_head(), self.git('rev-parse', 'HEAD'))
 
     def test_ship_refuses_to_push_over_foreign_commits(self):
+        self.assertEqual(self.run_script('--no-ship').returncode, 0)
         self.git("push", "-q", "origin", "test")
         other = self.origin.parent / "other"
         subprocess.run(['git', 'clone', '-q', '-b', 'test', str(self.origin), str(other)], check=True)
@@ -1333,7 +1608,7 @@ sys.exit(8 if cap else 0)
                      ['push', '-q', 'origin', 'test']):
             subprocess.run(['git', *args], cwd=other, check=True)
         foreign = self.remote_head()
-        result = self.run_script()
+        result = self.run_script('--epic-only')
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.state()['_ship']['status'], 'needs-human')
         self.assertIn('never force-pushes', self.state()['_ship']['reason'])
@@ -1552,7 +1827,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(len(self.calls()), before)  # Same head: still blocked, no agent asked again.
 
     def human_fix(self, name):
-        (self.root / name).write_text("fixed by a person\n")
+        (self.checkout() / name).write_text("fixed by a person\n")
         self.git("add", name)
         self.git("commit", "-qm", f"Fix {name}")
         return self.git("rev-parse", "HEAD")

@@ -143,7 +143,7 @@ exactly one line for the work as it stands: STATUS=COMPLETE, STATUS=NEEDS_HUMAN,
         commits = int(git(wt, "rev-list", "--count", f"{record['base']}..HEAD"))
         if not commits:
             with self.integration:
-                self.finish(n, record, git(self.root, "rev-parse", "HEAD"))
+                self.finish(n, record, git(self.tree, "rev-parse", "HEAD"))
                 say(f"#{n} complete with no commits; nothing to review or integrate", GREEN, BOLD)
                 self.cleanup(n)
         elif self.osmani:

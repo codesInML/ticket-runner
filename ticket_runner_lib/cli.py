@@ -74,13 +74,15 @@ import subprocess
 import sys
 
 from .backends import codex_auth, company_key, strip_codex_auth
+from .epic_branch import blocked_by_checkout, default_target, local_tip, prepare, require_agents_md, tree_path
 from .config import load_config, plan_problems, plan_stages, skill_problems, stage_refusals, stage_skills
 from .display import dollars, paint, say
 from .github import discover, gh_json
 from .graph import classify, render_graph
 from .processes import attempt, command, dirty
 from .runner import Runner
-from .settings import (BACKENDS, BACKEND_DEFAULTS, BACKEND_EFFORTS, BACKEND_MODELS, BOLD, BUDGETS, DIM, EFFORTS,
+from .worktrees import provision_tree
+from .settings import (BACKENDS, BACKEND_DEFAULTS, BACKEND_EFFORTS, BACKEND_MODELS, BOLD, BUDGETS, CONFIG, DIM, EFFORTS,
                        KEYCHAIN_SERVICE, LAUNCH_PLAN_MODELS, MODELS, OSMANI_SOURCE, RED, WORKFLOWS, YELLOW)
 
 
@@ -233,6 +235,12 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
                    "codex, opus on claude-api, off on commandcode)")
     p.add_argument("--escalate-effort", default=os.getenv("ESCALATE_EFFORT"))
     p.add_argument("--escalate-max-turns", type=positive, default=os.getenv("ESCALATE_MAX_TURNS", "500"))
+    p.add_argument("--branch", help="the epic branch tickets merge into, whatever is checked out; required on an "
+                   "epic's first run, then saved with the epic")
+    p.add_argument("--from", dest="from_branch", help="start a new --branch here instead of on the pull request "
+                   "target; also becomes that target unless --pr-base says otherwise")
+    p.add_argument("--pr-base", help="where the epic's pull request goes; saved with the epic (default: --from, then "
+                   "the config's prBase, then origin's default branch)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--only", type=positive)
@@ -350,18 +358,18 @@ def plan_models(a, source):
     return "\n".join(lines)
 
 
-def epic_base(a):
+def epic_base(a, branch):
     if a.epic_base:
         return command("git", "rev-parse", "--verify", f"{a.epic_base}^{{commit}}")
-    head = command("git", "rev-parse", "HEAD")
+    head = command("git", "rev-parse", branch)
     if not a.epic_only:
         return head
     # A fresh --epic-only has no recorded start; review everything the branch adds to the default branch.
     default = subprocess.run(["git", "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
                              capture_output=True, text=True).stdout.strip() or "main"
-    base = command("git", "merge-base", "HEAD", default)
+    base = command("git", "merge-base", branch, default)
     if base == head:
-        raise RuntimeError(f"Nothing to review: HEAD has no commits beyond {default}. Pass --epic-base")
+        raise RuntimeError(f"Nothing to review: {branch} has no commits beyond {default}. Pass --epic-base")
     return base
 
 
@@ -374,6 +382,8 @@ def main():
     override = os.environ.pop("TICKET_RUNNER_ANTHROPIC_API_KEY", "").strip()
     a.company_credentials = ((override, "env") if override else company_key()) if a.backend == "claude-api" else (None, None)
     root = Path(command("git", "rev-parse", "--show-toplevel"))
+    if root.parent.parent.name == ".scratch":
+        raise RuntimeError(f"{root} is a worktree the runner made; run this from the project's own folder")
     os.chdir(root)
     folder = root / ".scratch" / "run-tickets-commandcode" / str(a.parent)
     if a.dry_run:
@@ -384,16 +394,62 @@ def main():
     ignore = root / ".scratch/.gitignore"
     if not ignore.exists():
         ignore.write_text("*\n")
-    with (folder.parent / ".lock").open("a") as lock:
+    # One runner per epic. A version from before epic worktrees holds the checkout's lock exclusively, and owns
+    # the main folder and every epic's state while it runs; sharing that lock keeps the versions apart both ways.
+    with (folder.parent / ".lock").open("a") as checkout, (folder / ".lock").open("a") as lock:
+        try:
+            fcntl.flock(checkout, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("An older ticket runner is active in this checkout; let it finish first")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise RuntimeError("Another ticket runner is active in this checkout")
+            raise RuntimeError(f"Another ticket runner is active on epic #{a.parent}")
         return run_checkout(a, root, folder)
 
 
+def branch_refusals(a, root, meta, tree):
+    """Reasons this run cannot have the branch and pull request target it asks for, before anything is spent."""
+    saved, branch = meta.get("branch"), a.branch or meta.get("branch")
+    if not branch:
+        return [f"--branch is required on an epic's first run: name the branch #{a.parent}'s tickets merge into"]
+    refusals = []
+    if saved and a.branch and a.branch != saved:
+        refusals.append(f"#{a.parent} merges into {saved}, not {a.branch}; drop --branch to continue it")
+    if attempt(root, "check-ref-format", "--branch", branch).returncode:
+        refusals.append(f"{branch} is not a valid branch name")
+    if meta.get("prBase") and a.pr_base and a.pr_base != meta["prBase"]:
+        refusals.append(f"#{a.parent}'s pull request goes to {meta['prBase']}, not {a.pr_base}; drop --pr-base to "
+                        "continue it")
+    if a.from_branch and a.from_branch != meta.get("from") and local_tip(root, branch):
+        refusals.append(f"--from {a.from_branch} cannot apply: {branch} already exists and is used as it stands")
+    return refusals + list(filter(None, [blocked_by_checkout(root, branch, tree)]))
+
+
+def epic_worktree(a, root, cfg, meta, branch, target):
+    """The epic branch in its own worktree: created, or checked, and provisioned."""
+    tree = tree_path(root, a.parent)
+    if tree.is_dir():
+        if command("git", "branch", "--show-current", cwd=tree) != branch:
+            raise RuntimeError(f"{os.path.relpath(tree)} left {branch}; check it out again, then run this again")
+        if dirty(tree):
+            raise RuntimeError(f"Dirty {os.path.relpath(tree)}; commit or stash first. No files discarded.")
+        require_agents_md(root, branch, branch)
+    else:
+        # A saved epic needs nothing from origin while its branch is here: it can resume offline.
+        if not ("branch" in meta and local_tip(root, branch)):
+            prepare(root, branch, a.from_branch, target)
+        require_agents_md(root, branch, branch)
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        attempt(root, "worktree", "prune")
+        command("git", "worktree", "add", "-q", str(tree), branch, cwd=root)
+    provision_tree(root, root, tree, cfg)
+    return tree
+
+
 def run_checkout(a, root, folder):
-    cfg = load_config(root)
+    tree = tree_path(root, a.parent)
+    cfg = load_config(tree if (tree / CONFIG).exists() else root)
     path = folder / "state.json"
     data = json.loads(path.read_text()) if path.exists() else {}
     tickets, levels = discover(a.parent)
@@ -445,6 +501,7 @@ def run_checkout(a, root, folder):
                 f"their references with:\n  git clone --depth 1 --filter=blob:none --sparse {OSMANI_SOURCE} "
                 f"/tmp/agent-skills && git -C /tmp/agent-skills sparse-checkout set references && "
                 f"cp -R /tmp/agent-skills/references {skills_dir.parent}/"] if missing else []
+    refusals += branch_refusals(a, root, data.get("_meta", {}), tree)
     refusals += stage_refusals(a, cfg, root)
     if a.backend != "commandcode":
         refusals += backend_refusals(a, key)
@@ -462,7 +519,8 @@ def run_checkout(a, root, folder):
     if a.dry_run:
         done = {n for n in order if tickets[n]["state"] == "CLOSED" or data.get(str(n), {}).get("status") == "done"}
         say(render_graph(levels, tickets, classify({n: t["blockers"] for n, t in tickets.items()}, done)))
-        say(plan_stages(a, cfg, data, [n for n in order if n not in done], command("git", "rev-parse", "HEAD")))
+        tip = local_tip(root, a.branch or data.get("_meta", {}).get("branch") or "HEAD") or "unborn"
+        say(plan_stages(a, cfg, data, [n for n in order if n not in done], tip))
         say(plan_models(a, source))
         say("Dry run: no agents, file writes or GitHub edits.", DIM)
         for item in refusals:
@@ -472,23 +530,21 @@ def run_checkout(a, root, folder):
         raise RuntimeError("; ".join(refusals))
     if a.backend == "commandcode" and not shutil.which(os.getenv("COMMANDCODE_BIN", "command-code")):
         raise RuntimeError("CommandCode binary not found; set COMMANDCODE_BIN")
-    branch = command("git", "branch", "--show-current")
-    if not branch:
-        raise RuntimeError("Check out a branch before running")
-    if "_meta" not in data or a.epic_base:
-        data["_meta"] = {**data.get("_meta", {}), "branch": data.get("_meta", {}).get("branch", branch),
-                         "epicBase": epic_base(a)}
+    meta = data.get("_meta", {})
+    branch = meta.get("branch") or a.branch
+    target = a.pr_base or meta.get("prBase") or a.from_branch or meta.get("from") or cfg["prBase"] or default_target(root)
+    if target == branch:
+        raise RuntimeError(f"{branch} is the pull request target too; name a separate branch for the epic's tickets")
+    tree = epic_worktree(a, root, cfg, meta, branch, target)
+    if (tree / CONFIG).exists():  # The branch's own config, now that it is checked out.
+        cfg = load_config(tree)
+    if "_meta" not in data or "branch" not in meta or a.epic_base:
+        data["_meta"] = {**meta, "branch": branch, "epicBase": epic_base(a, branch)}
     meta = data["_meta"]
     meta["workflow"], meta["backend"] = a.workflow, a.backend
-    if meta["branch"] != branch:
-        raise RuntimeError(f"Saved state belongs to branch {meta['branch']}")
-    if command("git", "merge-base", meta["epicBase"], "HEAD") != meta["epicBase"]:
-        raise RuntimeError("Saved epic base is not an ancestor of HEAD")
-    if attempt(root, "cat-file", "-e", "HEAD:AGENTS.md").returncode:
-        raise RuntimeError(f"AGENTS.md is not committed on {branch}; ticket worktrees would not see it. "
-                           "Commit it on this branch first.")
-    if dirty(root):
-        raise RuntimeError("Dirty main worktree; commit or stash first. No files discarded.")
+    meta.update({k: v for k, v in (("prBase", target), ("from", a.from_branch)) if v and not meta.get(k)})
+    if command("git", "merge-base", meta["epicBase"], branch) != meta["epicBase"]:
+        raise RuntimeError(f"Saved epic base is not an ancestor of {branch}")
     skill = Path(os.getenv("IMPLEMENT_SKILL", str(Path.home() / ".agents/skills/implement/SKILL.md")))
     # Fix tickets from the epic review run through the implement skill too, even under --epic-only.
     if not osmani and not (a.epic_only and a.no_epic_review) and not skill.is_file():

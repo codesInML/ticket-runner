@@ -83,18 +83,18 @@ class EpicReview:
         if phase in ("review", "check", "tickets", "file"):
             return head == rv["start"]
         if phase == "fix":  # Fix tickets integrating move the epic on from where the review started.
-            return not attempt(self.root, "merge-base", "--is-ancestor", rv["start"], head).returncode
+            return not attempt(self.tree, "merge-base", "--is-ancestor", rv["start"], head).returncode
         if phase in ("follow", "follow-check"):
             return head == rv.get("fixHead")
         if phase in ("blocked", "repair"):  # A person's fixes on the epic branch get the repair review.
             return bool(rv.get("fixHead")) and \
-                not attempt(self.root, "merge-base", "--is-ancestor", rv["fixHead"], head).returncode
+                not attempt(self.tree, "merge-base", "--is-ancestor", rv["fixHead"], head).returncode
         return False
 
     def epic_review(self):
-        if dirty(self.root):
+        if dirty(self.tree):
             raise RuntimeError("Epic review requires a clean tree")
-        head = git(self.root, "rev-parse", "HEAD")
+        head = git(self.tree, "rev-parse", "HEAD")
         rv = self.data.get("_review", {})
         if self.review_covers(head):
             say(f"Epic review already said SHIP for {head[:8]}; skipping. Report: "
@@ -143,7 +143,7 @@ class EpicReview:
         A report without the step's end line gets one nudge into its session. None when the main worktree
         changed; an unfinished session is left in rv["stopped"] for stopped().
         """
-        a, head = self.a, git(self.root, "rev-parse", "HEAD")
+        a, head = self.a, git(self.tree, "rev-parse", "HEAD")
         self.update(rv, status="in-progress", drop=("reason",))
         jobs = []
         for r in todo:
@@ -178,7 +178,7 @@ exactly one line for your report as it stands: {line}.
                 # The steps parse the whole report, so only the reply's line joins it.
                 texts[i] = f"{texts[i].rstrip()}\n{reply.strip().splitlines()[-1]}" if reply.strip() else texts[i]
             self.guard()
-        if dirty(self.root) or git(self.root, "rev-parse", "HEAD") != head:
+        if dirty(self.tree) or git(self.tree, "rev-parse", "HEAD") != head:
             self.epic_fail(rv, "needs-human", "an epic reviewer changed the main worktree, but the review must be "
                            "read-only; inspect it, then --epic-only")
             return None
@@ -470,7 +470,7 @@ exactly one line for your report as it stands: {line}.
             outcome_ = self.schedule(self.preflight(todo))
             if outcome_ is not None:
                 return outcome_
-        self.update(rv, phase="follow", fixHead=git(self.root, "rev-parse", "HEAD"))
+        self.update(rv, phase="follow", fixHead=git(self.tree, "rev-parse", "HEAD"))
 
     def follow_up(self, rv):
         """The reviewers read only the fix diff: each confirmed finding FIXED or NOT FIXED, and any regression."""
@@ -525,7 +525,7 @@ exactly one line for your report as it stands: {line}.
 
     def still_blocked(self, rv):
         """Blocked until a person commits on the epic branch; their commits get the repair review."""
-        if git(self.root, "rev-parse", "HEAD") != rv.get("repairHead", rv["fixHead"]):
+        if git(self.tree, "rev-parse", "HEAD") != rv.get("repairHead", rv["fixHead"]):
             self.update(rv, phase="repair")
             return None
         return self.epic_fail(rv, "needs-human", rv.get("reason") or "the epic review is still blocked")
@@ -543,7 +543,7 @@ exactly one line for your report as it stands: {line}.
 
         Never a fresh review: the epic was reviewed whole once, so later rounds judge only what changed.
         """
-        head, targets, r = git(self.root, "rev-parse", "HEAD"), self.unresolved(rv), rv["reviewers"][-1]
+        head, targets, r = git(self.tree, "rev-parse", "HEAD"), self.unresolved(rv), rv["reviewers"][-1]
         if not targets:
             return self.review_ship(rv)
         texts = self.run_reviewers(rv, [r], "repair", lambda r: self.epic_repair_prompt(rv, r, targets))
@@ -579,7 +579,7 @@ exactly one line for your report as it stands: {line}.
                               "branch, then --epic-only reviews the repair again")
 
     def review_ship(self, rv):
-        head = git(self.root, "rev-parse", "HEAD")
+        head = git(self.tree, "rev-parse", "HEAD")
         self.update(rv, status="ship", head=head, phase=None, drop=("reason",))
         self.write_report(rv)
         self.post_findings(rv)
