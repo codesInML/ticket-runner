@@ -1029,7 +1029,7 @@ sys.exit(8 if cap else 0)
     def test_removing_the_label_continues_a_waiting_ticket_without_a_rerun(self):
         runner = self.waiting_run('--no-epic-review')
         self.until_waiting(runner)
-        self.pause()
+        __import__('time').sleep(1.5)  # The scheduler looks about twice a second, and says what it waits on.
         self.assertIsNone(runner.poll())
         self.assertEqual(len(self.calls()), 1)  # Its dependent stays held, and nothing is asked again.
         (self.root / 'answered').write_text('')
