@@ -545,11 +545,50 @@ sys.exit(8 if cap else 0)
     def test_only_one_command_is_installed(self):
         self.assertEqual([p.name for p in (RUNNER / 'bin').iterdir()], ['ticket-runner'])
 
+    def test_commandcode_defaults_never_name_luna(self):
+        self.plan_osmani()
+        result = self.run_osmani('--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('luna', result.stdout.lower())
+        self.assertIn('ticket review minimax/minimax-m3.1-flash @ high', result.stdout)
+        self.assertIn('z-ai/glm-5.3-flash @ high', result.stdout)
+        self.assertIn('verify        minimax/minimax-m3.1-flash @ high', result.stdout)
+
+    def test_commandcode_refuses_luna_from_any_flag_or_variable(self):
+        self.plan_osmani()
+        for args, extra in ((('--model', 'luna'), {}), (('--model', 'gpt-6-luna'), {}),
+                            (('--ticket-review-model', 'gpt-6-luna,glm'), {}), (('--verify-model', 'luna'), {}),
+                            ((), {'EPIC_REVIEW_MODEL': 'luna'}), (('--escalate-model', 'openai/gpt-6-luna'), {})):
+            with self.subTest(args=args, extra=extra):
+                self.env.update(extra)
+                result = self.run_osmani('--dry-run', *args)
+                for name in extra:
+                    self.env.pop(name)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn('is Luna, which commandcode no longer runs', result.stderr)
+        self.assertEqual(self.calls_made(), 0)
+
+    def test_a_saved_luna_ticket_review_moves_to_the_current_reviewer(self):
+        self.plan_osmani()
+        self.assertEqual(self.run_osmani('--only', '209', mode='review-fail-always').returncode, 1)
+        path = self.root / '.scratch/run-tickets-commandcode/207/state.json'
+        state = json.loads(path.read_text())
+        state['209']['ticketReview'].update(model='gpt-6-luna', sessionId='luna-session')
+        path.write_text(json.dumps(state))
+        before = self.calls_made()
+        self.run_osmani('--resume', '--only', '209', mode='review-fail-always')
+        models = [self.model(c) for c in self.calls()[before:]]
+        self.assertTrue(models)
+        self.assertNotIn('gpt-6-luna', models)
+        review = self.state()['209']['ticketReview']
+        self.assertEqual(review['model'], 'z-ai/glm-5.3-flash')  # odd #209's reviewer
+        self.assertNotEqual(review.get('sessionId'), 'luna-session')
+
     def test_model_aliases_select_supported_effort(self):
         for alias, model, effort in [('flash', 'deepseek/deepseek-v4.1-flash', 'max'),
                                      ('flash-fast', 'deepseek/deepseek-v4.1-flash-fast', 'max'),
                                      ('muse', 'meta/muse-spark-1.3-contributor', 'xhigh'),
-                                     ('luna', 'gpt-6-luna', 'max'),
+                                     ('minimax', 'minimax/minimax-m3.1-flash', 'max'),
                                      ('glm', 'z-ai/glm-5.3-flash', 'max')]:
             with self.subTest(model=alias):
                 result = self.run_script('--dry-run', '--model', alias)
@@ -619,9 +658,9 @@ sys.exit(8 if cap else 0)
         calls = self.calls()
         self.assertEqual(self.kinds(), ['implement', 'ticket review', 'implement', 'ticket review', 'epic review',
                                         'epic review', 'cross', 'launch plan'])
-        # Odd #209 gets the second model (glm), even #210 the first (luna); both review at high.
+        # Odd #209 gets the second model (glm), even #210 the first (minimax); both review at high.
         self.assertEqual(self.model(calls[1]), 'z-ai/glm-5.3-flash')
-        self.assertEqual(self.model(calls[3]), 'gpt-6-luna')
+        self.assertEqual(self.model(calls[3]), 'minimax/minimax-m3.1-flash')
         self.assertEqual(calls[1][calls[1].index('--effort')+1], 'high')
         implement = self.prompt(calls[0])
         self.assertIn(str(self.skills / 'incremental-implementation' / 'SKILL.md'), implement)
@@ -1235,7 +1274,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'verifier',
                                         'launch plan'])
         verifier = self.call('verifier')
-        self.assertEqual(self.model(verifier), 'gpt-6-luna')
+        self.assertEqual(self.model(verifier), 'minimax/minimax-m3.1-flash')
         self.assertEqual(verifier[verifier.index('--effort')+1], 'high')
         self.assertNotIn('--tools-enable', verifier)
         self.assertIn('checks.md', self.prompt(verifier))
@@ -1681,7 +1720,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual((d1['outcome'], d1.get('withdrawn')), ('confirmed', None))
 
     def test_epic_reviewers_are_one_or_two_different_models(self):
-        for models in ('flash,deepseek', 'flash,glm,luna', ''):
+        for models in ('flash,deepseek', 'flash,glm,minimax', ''):
             with self.subTest(models=models):
                 result = self.run_script('--dry-run', '--epic-review-model', models)
                 self.assertEqual(result.returncode, 2)

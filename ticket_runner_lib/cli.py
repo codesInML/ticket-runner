@@ -106,10 +106,10 @@ def saved_settings(parent):
 
 def parse_args():
     p = argparse.ArgumentParser(prog="ticket-runner", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Model aliases (commandcode): flash or deepseek (default), flash-fast, muse, luna, glm, claude.
-Full CommandCode model IDs also work. DeepSeek and GLM run the epic review by default; the
-launch plan runs on deepseek (or glm, never Claude); luna runs the verifier; verify
-repairs use the implementation model.
+        epilog="""Model aliases (commandcode): flash or deepseek (default), flash-fast, muse, minimax, glm, claude.
+Full CommandCode model IDs also work, except Luna, which this backend refuses. DeepSeek and GLM run
+the epic review by default; the launch plan runs on deepseek (or glm, never Claude); minimax runs
+the verifier; verify repairs use the implementation model.
 Effort defaults: max for implementation (xhigh for Muse contributor), high for reviews.
 
 Model aliases (claude): sonnet, opus, haiku; full claude-* IDs also work, and nothing else.
@@ -216,13 +216,13 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, WORKFLOW, IMPL
     p.add_argument("--jobs", type=positive, default=os.getenv("IMPL_JOBS", "3"),
                    help="tickets implemented at once (default 3)")
     p.add_argument("--ticket-review-model", default=os.getenv("TICKET_REVIEW_MODEL"),
-                   help="comma-separated models ticket reviews alternate over (osmani; default luna,glm; opus on "
-                   "claude-api)")
+                   help="comma-separated models ticket reviews alternate over (osmani; default minimax,glm; sonnet on "
+                   "claude)")
     p.add_argument("--ticket-review-effort", default=os.getenv("TICKET_REVIEW_EFFORT"))
     p.add_argument("--ticket-review-max-turns", type=positive, default=os.getenv("TICKET_REVIEW_MAX_TURNS", "500"))
     p.add_argument("--skip-plan-check", action="store_true", help="run an osmani epic despite plan check refusals")
     p.add_argument("--verify-model", default=os.getenv("VERIFY_MODEL"),
-                   help="model of the verify stage's read-only verifier (default luna; sonnet on claude-api)")
+                   help="model of the verify stage's read-only verifier (default minimax; sonnet on claude)")
     p.add_argument("--verify-effort", default=os.getenv("VERIFY_EFFORT"))
     p.add_argument("--verify-max-turns", type=positive, default=os.getenv("VERIFY_MAX_TURNS", "500"))
     p.add_argument("--no-verify", action="store_true", help="skip the verify stage")
@@ -318,6 +318,10 @@ def stage_models(a):
 
 def backend_refusals(a):
     """Prove the run-wide model and account boundary before any spend, including on a dry run."""
+    if a.backend == "commandcode":
+        # Luna is left out of this backend entirely, so no flag or environment variable brings it back.
+        return [f"{stage} model {model} is Luna, which commandcode no longer runs; choose another model"
+                for stage, model, _, _ in stage_models(a) if re.search(r"\bluna\b", model, re.I)]
     if a.backend == "codex":
         refusals = [f"{stage} model {model} is not a gpt-* model; codex runs every stage on the Codex CLI"
                     for stage, model, _, _ in stage_models(a) if not re.fullmatch(r"gpt-[a-z0-9][a-z0-9.-]*", model)]
@@ -352,6 +356,15 @@ def plan_models(a):
         lines.append(f"  {stage if stage not in seen else '':<13} {model} @ {effort}, {turns} turns")
         seen.add(stage)
     return "\n".join(lines)
+
+
+def retire_luna(data):
+    """A commandcode ticket's saved Luna review moves to the ticket's current reviewer on its next round."""
+    for record in data.values():
+        review = record.get("ticketReview") if isinstance(record, dict) else None
+        if isinstance(review, dict) and re.search(r"\bluna\b", str(review.get("model")), re.I):
+            for key in ("model", "sessionId"):
+                review.pop(key, None)
 
 
 def epic_base(a):
@@ -494,6 +507,8 @@ def run_checkout(a, root, folder):
     # Fix tickets from the epic review run through the implement skill too, even under --epic-only.
     if not osmani and not (a.epic_only and a.no_epic_review) and not skill.is_file():
         raise RuntimeError(f"Implementation skill not found: {skill}")
+    if a.backend == "commandcode":
+        retire_luna(data)
     return Runner(a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg).execute()
 
 

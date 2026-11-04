@@ -9,7 +9,7 @@ MODELS = {
     "flash": "deepseek/deepseek-v4.1-flash",
     "flash-fast": "deepseek/deepseek-v4.1-flash-fast",
     "muse": "meta/muse-spark-1.3-contributor",
-    "luna": "gpt-6-luna",
+    "minimax": "minimax/minimax-m3.1-flash",
     "glm": "z-ai/glm-5.3-flash",
     "claude": "claude-sonnet-5-5",
 }
@@ -21,7 +21,7 @@ EFFORTS = {
     MODELS["flash"]: {"off", "low", "high", "max"},
     MODELS["flash-fast"]: {"off", "low", "high", "max"},
     MODELS["muse"]: {"low", "medium", "high", "xhigh"},
-    MODELS["luna"]: {"low", "medium", "high", "xhigh", "max"},
+    MODELS["minimax"]: {"low", "medium", "high", "xhigh", "max"},
     MODELS["glm"]: {"low", "high", "max"},
     CLAUDE_MODEL: {"low", "medium", "high", "xhigh", "max"},
 }
@@ -82,7 +82,7 @@ EPIC_REVIEWERS = "deepseek,glm"
 # env var names one. CommandCode's implementation effort follows its model (see cli.py).
 # The escalation model takes over a stuck ticket; "off" leaves it to a human (CommandCode by default, so a
 # run never starts spending on Claude unless asked).
-COMMANDCODE_DEFAULTS = {"": ("flash", None), "ticket_review_": ("luna,glm", "high"), "verify_": ("luna", "high"),
+COMMANDCODE_DEFAULTS = {"": ("flash", None), "ticket_review_": ("minimax,glm", "high"), "verify_": ("minimax", "high"),
                         "epic_review_": (EPIC_REVIEWERS, "high"), "launch_plan_": ("deepseek", "high"),
                         "escalate_": ("off", "high")}
 # Sonnet on every ticket, Opus saved for the epic review and stuck tickets: the limit here is the plan's usage.
