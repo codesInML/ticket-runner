@@ -2,6 +2,70 @@
 
 Run `bin/ticket-runner --help` for workflow, configuration, and resume options.
 
+## Branches and the epic worktree
+
+`ticket-runner 207 --branch feat/payments` merges #207's tickets into `feat/payments`, whatever you have checked
+out. `--branch` is required on an epic's first run and saved with it, so later runs need only
+`ticket-runner 207 --resume`; naming a different branch later is refused.
+
+A branch that does not exist starts from the latest pull request target on origin, or from `--from <branch>`. One
+that exists is used as it stands, and `--from` is refused; one only on origin gets a local copy, and one behind origin
+fast-forwards. A local copy and an origin copy that have both moved on stop the run.
+
+The pull request target is the first of `--pr-base`, `--from`, the config's `prBase`, and origin's default branch. It
+is saved with the epic, and a later `--pr-base` naming another is refused.
+
+| Command | Tickets merge into | Pull request goes to |
+| --- | --- | --- |
+| `--branch feat/payments` | `feat/payments` | `main` |
+| `--branch feat/refunds --from feat/payments` | `feat/refunds` | `feat/payments` |
+| `--branch feat/payments --pr-base develop` | `feat/payments` | `develop` |
+
+Each epic runs in its own worktree at `.scratch/epics/<parent>`, so the folder you ran the command from is never
+touched and several epics can run at once from it, each with its own lock and `--jobs` count. Commit epic-level fixes
+in that worktree: git allows a branch to be checked out in only one place. The worktree is deleted when a run
+succeeds, which frees the branch for you to check out; every commit stays on the branch, and a later run recreates it.
+It stays while the run is waiting, after a failure or Ctrl-C, after `--only`, and while it holds uncommitted changes.
+
+The project config is read from the epic branch when committed there, otherwise from your folder. Link files, dependency
+directories and `serveEnv` come from your folder.
+
+An epic part-way through from before epic worktrees still has its branch checked out in your folder. `--resume` asks
+you to switch that folder to another branch once, then carries on; finished tickets, ticket worktrees and saved sessions
+stay valid. A runner of that older version in the same checkout makes this one refuse to start, and the other way round.
+
+## Unblocking
+
+A ticket that ends `needs-human` or `awaiting-human` gets the `needs-human` label, and the run stays alive. Fix it in
+its worktree (commit, finish any rebase), or answer on the issue, then remove the label: within about 30 seconds the
+run continues that ticket as `--resume` would. Other tickets keep running meanwhile, its dependents stay held, and
+a ticket that gets stuck again gets the label back. Closing the issue by hand also ends the wait.
+
+The epic works the same way. When an epic stage ends `needs-human`, fix it (in the epic worktree, or the kept verify
+worktree), then remove the label from the epic issue to run the stages again.
+
+The run waits with no time limit and repeats what is waiting every 30 minutes. It exits once no ticket is running or
+waiting and nothing further can start. Other endings such as `turn-cap` and `error` do not wait, and need `--resume`.
+A usage limit or a signed-out login still stops the whole run. Ctrl-C while waiting is safe.
+
+The label decides on restarts too: `--resume` continues a ticket whose label is gone, even if you removed it while
+nothing was running, and waits on one that still has it. `--resume --only <n>` continues a ticket regardless, and
+`--epic-only --force` runs the epic stages regardless. A label only counts as removed once the run has seen it on
+GitHub, and an issue it cannot read counts as still blocked, so a failed update can never look like an unblock. A ticket
+stuck before this existed gets its label on the first sync and then waits, even if you had already cleared it by hand.
+
+## GitHub sync
+
+Labels, closing tickets after SHIP, the findings and cost comments, and fix ticket links all go through one sync step,
+about every 30 seconds and at startup. It compares what the saved state says GitHub should show with what GitHub last
+confirmed, so only the current status is ever sent, a restart needs nothing special, and removing a label is never
+undone. Network failures and GitHub outages keep retrying while work carries on; a real error such as a lost permission
+is reported once and tried again next run. A run that ends tries for about 2 minutes more, lists anything still
+unsent, and the next run of that epic sends it. Nothing syncs while no run is active.
+
+A label missing from the repo is created, in a fixed colour, when it is being added, and dropped from the command when
+it is being removed. A label that exists keeps its own colour and description.
+
 ## Escalation and self-verification
 
 A ticket is stuck when its implementer ends NEEDS_HUMAN, BLOCKED or without a STATUS line, when its fix
@@ -13,7 +77,7 @@ problem, run the checks itself, and stop only for a decision that belongs to a p
 is followed by one more review round with the same reviewer; a ticket still blocking after that needs a
 human. Every re-review confirms the previous findings and draws new BLOCKING findings only from the
 fix diff (since the commit the previous review read); older problems it notices are DEFERRED unless they
-leave a criterion UNMET. After a person fixes a needs-human ticket in its worktree, `--resume` re-reviews
+leave a criterion UNMET. After a person fixes a needs-human ticket in its worktree and unblocks it, the next review reads
 their commits against the last review the same way. An escalation that ends NEEDS_HUMAN waits on the issue (`awaiting-human`) as before, and an
 interrupted one resumes its own thread with `--resume`.
 
@@ -131,6 +195,8 @@ once; top up or fix the key, then `--resume`. Rate limits and overloads end only
   review, and closing sub-tickets.
 - `verification.py`: command and runtime checks, repairs, and reports.
 - `shipping.py`: launch plans, pushes, pull requests, and CI-gated merges.
+- `sync.py`: keeping GitHub in step with saved state, and watching for an unblock.
+- `epic_branch.py`: setting up the epic branch before a run starts.
 - `config.py`, `github.py`, and `graph.py`: configuration validation, issue
   discovery, and dependency graph operations.
 - `settings.py`, `display.py`, `processes.py`, and `text.py`: defaults and shared
@@ -149,7 +215,7 @@ verification tests also start a temporary server on localhost.
 
 ## Integration and recovery guarantees
 
-The runner holds one checkout lock before reading saved state or discovering issues.
+The runner holds one lock per epic before reading saved state or discovering issues.
 Every ticket with commits runs the configured gate before integration, including tickets
 whose base has not moved. A ticket that ends STATUS=COMPLETE with no commits and a clean
 worktree has nothing to integrate: it is done at once, without a ticket review or gate,
@@ -195,7 +261,7 @@ not a model, decides which findings are confirmed, disputed or withdrawn. Only c
 blocking findings become fix tickets, and only the runner files them, with a marker in each
 body so a retry finds an issue it already filed instead of filing it twice. One follow-up
 review reads only the fix diff; anything still blocking needs a human. When that person commits
-fixes on the epic branch, `--epic-only` gives their commits (since the fix tickets) a repair review by
+fixes on the epic branch and unblocks the epic, the next run of the stages gives their commits (since the fix tickets) a repair review by
 the last reviewer instead of a fresh review of the whole epic: each open finding FIXED or NOT FIXED,
 plus anything those commits broke. It repeats for each later commit until it says SHIP, and only a
 branch that no longer contains the fix tickets, or changed requirements or reviewers, start over. A
