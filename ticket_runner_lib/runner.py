@@ -16,7 +16,7 @@ from .processes import attempt, dirty, git, save
 from .prompts import Prompts
 from .review import Reviews
 from .scheduling import Scheduling
-from .settings import (BOLD, CLAUDE_CONFIG_DIR, CLAUDE_PROTECTED, CODEX_HOME_DIR, CODEX_PROTECTED, CONFIG,
+from .settings import (BOLD, CLAUDE_PROTECTED, CODEX_HOME_DIR, CODEX_PROTECTED, CONFIG,
                        Fatal, GREEN, TICKET_COLORS, YELLOW)
 from .shipping import Shipping
 from .text import section
@@ -29,7 +29,7 @@ class Runner(
     AgentProcesses, Scheduling, TicketImplementation, WorktreeIntegration,
     Prompts, Reviews, EpicReview, Verification, Shipping,
 ):
-    def __init__(self, a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg, key=None):
+    def __init__(self, a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg):
         self.a, self.root, self.folder, self.path, self.data, self.cfg = a, root, folder, path, data, cfg
         self.tickets, self.levels, self.skill, self.skills_dir = tickets, levels, skill, skills_dir
         self.osmani = a.workflow == "osmani"
@@ -38,15 +38,14 @@ class Runner(
         self.epic = data["_meta"]["branch"]
         self.blockers = {n: t["blockers"] for n, t in tickets.items()}
         self.worktrees = root / ".scratch" / "worktrees"
-        # The backend holds the company key for its children's environment only; it is never stored or shown.
-        self.claude = getattr(a, "backend", "commandcode") == "claude-api"
-        factories = {"commandcode": CommandCode, "claude-api": lambda: ClaudeCode(key, root / CLAUDE_CONFIG_DIR),
+        self.claude = getattr(a, "backend", "commandcode") == "claude"
+        factories = {"commandcode": CommandCode, "claude": ClaudeCode,
                      "codex": lambda: Codex(root / CODEX_HOME_DIR, a.codex_auth, a.codex_binary)}
         self.backend = factories[getattr(a, "backend", "commandcode")]()
         if hasattr(self.backend, "prepare"):
             self.backend.prepare(skills_dir)
         self.binary = self.backend.binary
-        self.budgets, self.spent = getattr(a, "budgets", {}), False
+        self.spent = False
         self.gate_cmd = os.getenv("GATE_CMDS") or " && ".join(cfg["gate"]) or "true"
         self.install_cmd = os.getenv("INSTALL_CMD") or cfg["install"]
         # state guards data/state.json; integration serializes every change to the epic branch,

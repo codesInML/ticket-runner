@@ -9,7 +9,7 @@ import time
 
 from .display import dollars, narrate, say, span
 from .processes import git, kill
-from .settings import BLUE, BOLD, BUDGET_OF, BUDGETS, DIM, Fatal, GREEN, Stop, YELLOW
+from .settings import BLUE, BOLD, DIM, Fatal, GREEN, Stop, YELLOW
 
 
 class AgentProcesses:
@@ -27,18 +27,17 @@ class AgentProcesses:
 
     def run_agent(self, model, effort, turns, prompt, folder, record, session=None, cwd=None,
                   tag="review", color=BLUE, browser=False, stage="implement"):
-        """One agent session on the run's backend; its final text. `stage` names its cost and its budget."""
+        """One agent session on the run's backend; its final text. `stage` names its cost."""
         cwd = cwd or self.root
         instructions = self.codex_snapshot(cwd) if self.backend.name == "codex" else None
         folder.mkdir(parents=True, exist_ok=True)
         if session and record.get("backend", "commandcode") != self.backend.name:
             session = None  # a session saved by the other CLI cannot be resumed by this one
         number = record.get("attempts", 0) + 1
-        # Kept once a record has one, so a commandcode attempt after a claude-api one can resume its own session.
+        # Kept once a record has one, so a commandcode attempt after a claude one can resume its own session.
         self.update(record, attempts=number, model=model, effort=effort, maxTurns=turns,
                     **({"backend": self.backend.name} if self.backend.name != "commandcode" or "backend" in record else {}))
-        budget = self.budgets.get(BUDGET_OF.get(stage, stage)) if self.claude else None
-        argv = self.backend.argv(model, effort, turns, prompt, session, cwd, budget, browser)
+        argv = self.backend.argv(model, effort, turns, prompt, session, cwd, browser)
         stream = self.backend.stream(turns)
         # Separate stdout NDJSON from stderr, and preserve every attempt's logs.
         events = folder / f"attempt-{number}.jsonl"
@@ -96,9 +95,6 @@ class AgentProcesses:
         label = f"{tag.split()[0]} {stage}" if tag.startswith("#") else tag
         if spent:
             self.spend(record, stage, model, effort, spent, session, status, label)
-        if status == "budget-cap":
-            say(f"{label} spent its {dollars(budget or 0)} budget ({BUDGETS[BUDGET_OF.get(stage, stage)]}): the "
-                "budget ran out, not the work; --resume continues the session with a fresh budget", YELLOW)
         if fatal:
             raise Fatal(fatal)
         return text

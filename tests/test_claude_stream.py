@@ -1,15 +1,16 @@
-"""The claude-api backend's reading of Claude Code's stream-json: narration, outcome, spend and argv."""
+"""The claude backend's reading of Claude Code's stream-json: narration, outcome, spend and argv."""
 
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from ticket_runner_lib import display
-from ticket_runner_lib.backends import ClaudeCode, ClaudeStream, company_key
-from ticket_runner_lib.settings import BROWSER_TOOLS
+from ticket_runner_lib.backends import ClaudeCode, ClaudeStream
+from ticket_runner_lib.settings import BROWSER_TOOLS, CLAUDE_SETTINGS
 
 
 def ended(*frames, rc=1):
@@ -31,7 +32,7 @@ def failed(text, error=None):
 
 
 class OutcomeTests(unittest.TestCase):
-    def test_success_with_text_is_reported_and_its_spend_kept(self):
+    def test_success_with_text_is_reported_with_tokens_and_no_dollar_figure(self):
         status, text, spent, fatal = ended(result(
             is_error=False, result="STATUS=COMPLETE", total_cost_usd=1.84, num_turns=62, duration_ms=840000,
             usage={"input_tokens": 1}, modelUsage={
@@ -40,12 +41,16 @@ class OutcomeTests(unittest.TestCase):
                 "claude-haiku-5-5": {"inputTokens": 1, "outputTokens": 2, "cacheReadInputTokens": 3,
                                      "cacheCreationInputTokens": 4, "costUSD": 0.34}}), rc=0)
         self.assertEqual((status, text, fatal), ("reported", "STATUS=COMPLETE", None))
-        self.assertEqual(spent, {"costUsd": 1.84, "numTurns": 62, "durationMs": 840000,
-                                 "usage": {"input": 11, "output": 22, "cacheRead": 33, "cacheCreation": 44}})
+        self.assertEqual(spent, {"numTurns": 62, "durationMs": 840000,
+                                 "usage": {"inputTokens": 11, "outputTokens": 22, "cacheReadInputTokens": 33,
+                                           "cacheCreationInputTokens": 44}})
+        status, _, spent, _ = ended(result(is_error=False, result="STATUS=COMPLETE", total_cost_usd=1.84,
+                                           usage={"input_tokens": 5, "output_tokens": 6}), rc=0)
+        self.assertEqual((spent["usage"]["inputTokens"], spent["usage"]["outputTokens"]), (5, 6))
+        self.assertNotIn("costUsd", spent)
 
-    def test_caps_map_to_their_own_statuses(self):
+    def test_the_turn_cap_maps_to_its_own_status(self):
         self.assertEqual(ended(result(subtype="error_max_turns", errors=[]))[0], "turn-cap")
-        self.assertEqual(ended(result(subtype="error_max_budget_usd", errors=[]))[0], "budget-cap")
 
     def test_no_result_or_empty_text_is_no_output(self):
         self.assertEqual(ended()[0:2], ("no-output", ""))
@@ -63,21 +68,48 @@ class OutcomeTests(unittest.TestCase):
 
     def test_account_failures_are_run_wide_fatal(self):
         cases = [([failed("Credit balance is too low", "billing_error"), result(result="Credit balance is too low")],
-                  "credit balance too low — top up, then --resume"),
+                  "a billing problem"),
                  ([result(result="Your credit balance is too low to access the Anthropic API.", api_error_status=400)],
-                  "credit balance too low"),
+                  "a billing problem"),
                  ([failed("Invalid API key · Fix external API key", "authentication_failed"), result(result="x")],
-                  "rejected as invalid or revoked"),
-                 ([result(result="Failed", api_error_status=401)], "rejected as invalid or revoked"),
-                 ([result(result='{"type":"error","error":{"type":"authentication_error"}}')], "invalid or revoked"),
-                 ([result(result="Forbidden", api_error_status=403)], "spend limit"),
-                 ([result(result="You have reached your specified API usage limits.")], "spend limit")]
+                  "run `claude auth login`"),
+                 ([result(result="Failed", api_error_status=401)], "run `claude auth login`"),
+                 ([result(result='{"type":"error","error":{"type":"authentication_error"}}')], "run `claude auth login`"),
+                 ([result(result="Authentication required · Sign in again")], "run `claude auth login`"),
+                 ([result(result="Forbidden", api_error_status=403)], "not permitted"),
+                 ([result(result="You have reached your specified API usage limits.")], "not permitted")]
         for frames, message in cases:
             with self.subTest(frames=frames):
                 status, _, _, fatal = ended(*frames)
                 self.assertEqual(status, "provider-error")
-                self.assertIn("company API key: ", fatal)
                 self.assertIn(message, fatal)
+
+    def test_a_spent_subscription_stops_the_run_though_it_arrives_as_a_rate_limit(self):
+        limit = {"type": "rate_limit_event", "session_id": "s",
+                 "rate_limit_info": {"status": "rejected", "resetsAt": 1893456000, "rateLimitType": "five_hour"}}
+        status, _, _, fatal = ended(limit, failed("You've hit your session limit · resets 3pm", "rate_limit"),
+                                    result(result="You've hit your session limit · resets 3pm", api_error_status=429))
+        self.assertEqual(status, "provider-error")
+        self.assertIn("usage limit was reached. Reset time: 20", fatal)
+        self.assertIn("then --resume", fatal)
+        # The wording alone is enough, with no reset time to name; a curly apostrophe reads the same.
+        for words in ("You've hit your weekly limit", "You’ve reached your Fable limit."):
+            status, _, _, fatal = ended(failed(words, "rate_limit"), result(result=words, api_error_status=429))
+            self.assertEqual(status, "provider-error")
+            self.assertIn("usage limit was reached. Wait for it to reset", fatal)
+
+    def test_a_rejected_window_means_nothing_when_the_session_succeeds(self):
+        limit = {"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1}}
+        status, _, _, fatal = ended(limit, result(is_error=False, result="STATUS=COMPLETE"), rc=0)
+        self.assertEqual((status, fatal), ("reported", None))
+        warning = {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning"}}
+        status, _, _, fatal = ended(warning, failed("API Error: 429", "rate_limit"), result(result="API Error: 429"))
+        self.assertEqual((status, fatal), ("provider-error", None))
+
+    def test_a_reset_time_that_cannot_be_read_is_left_out(self):
+        for resets in (True, "soon", 1e30):
+            limit = {"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": resets}}
+            self.assertIn("reached. Wait", ended(limit, result(result="failed"))[3])
 
     def test_the_projects_own_words_never_read_as_an_account_or_api_failure(self):
         # A credit-decisioning codebase talks about credit and rate limits in its own sense.
@@ -105,7 +137,7 @@ class NarrationTests(unittest.TestCase):
     def test_claude_events_become_the_same_feed(self):
         stream = ClaudeStream()
         sid, shown = stream.feed({"type": "system", "subtype": "init", "session_id": "abc",
-                                  "apiKeySource": "ANTHROPIC_API_KEY"})
+                                  "apiKeySource": "none"})
         self.assertEqual((sid, shown, stream.refusal), ("abc", [], None))
         message = {"id": "m1", "content": [{"type": "text", "text": "Looking"},
                                           {"type": "tool_use", "id": "t1", "name": "Bash",
@@ -138,8 +170,8 @@ class NarrationTests(unittest.TestCase):
 
 
 class AuthTests(unittest.TestCase):
-    def test_init_on_anything_but_the_company_key_is_refused(self):
-        for source in ("none", "/login managed key", "ANTHROPIC_AUTH_TOKEN"):
+    def test_init_on_anything_but_the_subscription_login_is_refused(self):
+        for source in ("ANTHROPIC_API_KEY", "/login managed key", "ANTHROPIC_AUTH_TOKEN", "apiKeyHelper"):
             stream = ClaudeStream()
             stream.feed({"type": "system", "subtype": "init", "session_id": "s", "apiKeySource": source})
             self.assertIn(repr(source), stream.refusal)
@@ -152,54 +184,74 @@ class AuthTests(unittest.TestCase):
         status, _, _, fatal = ended(failed("Not logged in · Please run /login", "authentication_failed"),
                                     result(result="Not logged in · Please run /login", api_error_status=None), rc=0)
         self.assertEqual(status, "provider-error")
-        self.assertIn("invalid or revoked", fatal)
-        self.assertIn("invalid or revoked", ended(result(result="Not logged in · Please run /login"), rc=0)[3])
+        self.assertIn("run `claude auth login`", fatal)
+        self.assertIn("run `claude auth login`", ended(result(result="Not logged in · Please run /login"), rc=0)[3])
+
+    def fake_status(self, folder, body, rc=0):
+        path = Path(folder) / "claude"
+        path.write_text(f"#!/bin/sh\necho '{body}'\nexit {rc}\n")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        return str(path)
+
+    def test_login_problem_accepts_only_a_claude_ai_subscription(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for body, rc, expected in (('{"loggedIn": true, "authMethod": "claude.ai"}', 0, None),
+                                       ('{"loggedIn": false, "authMethod": "none"}', 1, "not logged in"),
+                                       ('{"loggedIn": true, "authMethod": "console"}', 0, "not a claude.ai subscription"),
+                                       ('not json', 0, "could not read"), ('[]', 0, "not logged in")):
+                with self.subTest(body=body), patch.dict(os.environ, {"CLAUDE_BIN": self.fake_status(folder, body, rc)}):
+                    problem = ClaudeCode().login_problem()
+                    self.assertIsNone(problem) if expected is None else self.assertIn(expected, problem)
+        with patch.dict(os.environ, {"CLAUDE_BIN": "/no/such/claude"}):
+            self.assertIn("could not read", ClaudeCode().login_problem())
+
+    def test_the_login_check_sees_what_a_session_would(self):
+        with tempfile.TemporaryDirectory() as folder:
+            script = Path(folder) / "claude"
+            script.write_text('#!/bin/sh\nif [ -n "$ANTHROPIC_API_KEY$CLAUDE_CONFIG_DIR" ]; then echo "{}"; else '
+                              'echo \'{"loggedIn": true, "authMethod": "claude.ai"}\'; fi\n')
+            script.chmod(0o755)
+            with patch.dict(os.environ, {"CLAUDE_BIN": str(script), "ANTHROPIC_API_KEY": "x", "CLAUDE_CONFIG_DIR": "/x"}):
+                self.assertIsNone(ClaudeCode().login_problem())
 
 
 class ArgvTests(unittest.TestCase):
     def test_argv_never_bare_and_never_appends_claude_md(self):
-        backend = ClaudeCode("sk-test")
+        backend = ClaudeCode()
         with tempfile.TemporaryDirectory() as folder:
             (Path(folder) / "CLAUDE.md").write_text("notes")
-            argv = backend.argv("claude-opus-5-5", "none", 9, "do it", None, folder, None, False)
+            argv = backend.argv("claude-opus-5-5", "none", 9, "do it", None, folder, False)
             self.assertEqual(argv[1:4], ["-p", "do it", "--model"])
             self.assertNotIn("--bare", argv)
             self.assertNotIn("--append-system-prompt-file", argv)
             self.assertNotIn("--effort", argv)
-            argv = backend.argv("claude-opus-5-5", "high", 9, "do it", "sess", folder, 2.5, True)
-            self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "2.5")
+            self.assertNotIn("--max-budget-usd", argv)
+            self.assertIn("--strict-mcp-config", argv)
+            self.assertEqual(json.loads(argv[argv.index("--settings") + 1]), CLAUDE_SETTINGS)
+            self.assertEqual(argv[argv.index("--setting-sources") + 1], "user")
+            self.assertNotIn("--mcp-config", argv)
+            argv = backend.argv("claude-opus-5-5", "high", 9, "do it", "sess", folder, True)
             self.assertEqual(argv[argv.index("--resume") + 1], "sess")
             self.assertEqual(argv[argv.index("--effort") + 1], "high")
+            self.assertLess(argv.index("--strict-mcp-config"), argv.index("--mcp-config"))
             self.assertEqual(argv[-1], ",".join(BROWSER_TOOLS))  # list-taking flags go last
 
-    def test_child_env_carries_only_the_company_key_and_the_runners_config_dir(self):
+    def test_settings_turn_off_attribution_and_auto_memory(self):
+        self.assertEqual(CLAUDE_SETTINGS, {"attribution": {"commit": "", "pr": ""}, "autoMemoryEnabled": False})
+
+    def test_child_env_leaves_only_the_operators_login_reachable(self):
         leaked = {"ANTHROPIC_API_KEY": "personal", "ANTHROPIC_AUTH_TOKEN": "oauth", "ANTHROPIC_BASE_URL": "http://x",
                   "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat", "CLAUDE_CONFIG_DIR": "/personal",
-                  "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_VERTEX": "1", "CLAUDE_CODE_USE_FOUNDRY": "1"}
+                  "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_VERTEX": "1", "CLAUDE_CODE_USE_FOUNDRY": "1",
+                  "TICKET_RUNNER_ANTHROPIC_API_KEY": "stale"}
         with patch.dict(os.environ, leaked):
-            env = ClaudeCode("sk-company", Path("/runner/config")).env()
+            env = ClaudeCode().env()
             self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "personal")  # the runner's own env is untouched
-        self.assertEqual((env.pop("ANTHROPIC_API_KEY"), env.pop("CLAUDE_CONFIG_DIR")), ("sk-company", "/runner/config"))
         self.assertFalse(set(leaked) & set(env))
+        self.assertEqual(env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
 
-    def test_prepare_seeds_skills_and_settings_and_follows_a_moved_skills_dir(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            (root / "a").mkdir()
-            (root / "b").mkdir()
-            backend = ClaudeCode("sk", root / "config")
-            backend.prepare(root / "a")
-            self.assertEqual((root / "config/skills").resolve(), (root / "a").resolve())
-            self.assertFalse(json.loads((root / "config/settings.json").read_text())["autoMemoryEnabled"])
-            backend.prepare(root / "b")
-            self.assertEqual((root / "config/skills").resolve(), (root / "b").resolve())
-
-    def test_key_from_env_wins_and_an_empty_one_does_not_count(self):
-        with patch.dict(os.environ, {"TICKET_RUNNER_ANTHROPIC_API_KEY": "sk-env"}):
-            self.assertEqual(company_key(), ("sk-env", "env"))
-        with patch.dict(os.environ, {"TICKET_RUNNER_ANTHROPIC_API_KEY": " ", "TICKET_RUNNER_KEYCHAIN_SERVICE": "svc",
-                                     "PATH": "/nonexistent"}):
-            self.assertEqual(company_key(), (None, None))  # no `security` on PATH: no key, never a guess
+    def test_nothing_is_seeded(self):
+        self.assertFalse(hasattr(ClaudeCode(), "prepare"))
 
 
 if __name__ == "__main__":

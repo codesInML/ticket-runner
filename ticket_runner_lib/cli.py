@@ -53,11 +53,10 @@ debugging-and-error-recovery, the launch plan follows shipping-and-launch, and t
 uses browser-testing-with-devtools when the project config turns the browser on.
 
 A backend is the agent CLI and account of every session in the run, independent of the workflow:
-  commandcode  the command-code CLI and its models (default).
-  claude-api   Claude Code on the company Anthropic API key and a config directory of the
-               runner's own, never a personal subscription (docs/adr/0002-*). Every stage must
-               name a Claude model; CLAUDE.md, CLAUDE.local.md and .claude/ join the protected paths; each
-               session's cost is recorded.
+  commandcode  the command-code CLI and its models.
+  claude       Claude Code on the operator's normal login and subscription (docs/adr/0004-*).
+               Every stage must name a Claude model; CLAUDE.md, CLAUDE.local.md and .claude/ join
+               the protected paths; costs record tokens and time only.
   codex        Codex CLI on the operator's ChatGPT subscription, with an isolated CODEX_HOME.
                Every stage names a gpt-* model; costs record tokens and time only.
 """
@@ -73,15 +72,15 @@ import signal
 import subprocess
 import sys
 
-from .backends import codex_auth, company_key, strip_codex_auth
+from .backends import ClaudeCode, codex_auth, strip_codex_auth
 from .config import load_config, plan_problems, plan_stages, skill_problems, stage_refusals, stage_skills
-from .display import dollars, paint, say
+from .display import paint, say
 from .github import discover, gh_json
 from .graph import classify, render_graph
 from .processes import attempt, command, dirty
 from .runner import Runner
-from .settings import (BACKENDS, BACKEND_DEFAULTS, BACKEND_EFFORTS, BACKEND_MODELS, BOLD, BUDGETS, DIM, EFFORTS,
-                       KEYCHAIN_SERVICE, LAUNCH_PLAN_MODELS, MODELS, OSMANI_SOURCE, RED, WORKFLOWS, YELLOW)
+from .settings import (BACKENDS, BACKEND_DEFAULTS, BACKEND_EFFORTS, BACKEND_MODELS, BOLD, DIM, EFFORTS,
+                       LAUNCH_PLAN_MODELS, MODELS, OSMANI_SOURCE, RED, REMOVED_BACKEND, WORKFLOWS, YELLOW)
 
 
 def positive(value):
@@ -98,16 +97,13 @@ launch plan runs on deepseek (or glm, never Claude); luna runs the verifier; ver
 repairs use the implementation model.
 Effort defaults: max for implementation (xhigh for Muse contributor), high for reviews.
 
-Model aliases (claude-api): sonnet, opus, haiku; full claude-* IDs also work, and nothing else.
-Defaults: sonnet @ medium implements (and runs fix, repair and verifier sessions), one opus
-@ high runs the epic review and re-checks its own findings, opus @ medium the ticket review,
-haiku @ low the launch plan. Efforts: low, medium, high, xhigh, max. The company key comes
-from TICKET_RUNNER_ANTHROPIC_API_KEY, else the Keychain item krim-anthropic-api-key; store it
-with: security add-generic-password -s krim-anthropic-api-key -a "$USER" -w
-Without one the run (and --dry-run) refuses. An account failure (credit, key, spend limit)
-stops every ticket; fix it, then --resume. A session over its *_MAX_BUDGET_USD ends budget-cap,
-and --resume continues it with a fresh budget. The ticket graph shows the epic's cost so far;
---post-costs puts it on the tickets' done comments and the epic issue, never the pull request.
+Model aliases (claude): sonnet, opus, haiku; full claude-* IDs also work, and nothing else.
+Defaults: sonnet @ medium implements (and runs fix, repair and verifier sessions), sonnet @ high
+reviews tickets, one opus @ medium reviews the epic, re-checks its own findings and takes over a
+stuck ticket, haiku @ low writes the launch plan. Efforts: low, medium, high, xhigh, max. Login:
+claude auth login (a claude.ai subscription, never an API key); without one the run (and --dry-run)
+refuses. A usage limit or signed-out login stops every ticket; fix it, then --resume. Costs are
+tokens and time, and --post-costs puts them on the epic issue, never the pull request.
 Ticket review (osmani only) alternates by ticket number over --ticket-review-model:
 even tickets get the first model, odd tickets the second; a re-review keeps its model.
 
@@ -118,7 +114,7 @@ ticket-review warning is intentional. Login: codex login (ChatGPT subscription, 
 The runner uses .scratch/codex-home with a symlink to the operator's auth.json and its own
 config. Completed tool items count toward the turn cap; --resume continues the same thread
 with a fresh cap. Usage limits and signed-out logins stop every ticket; request failures
-are retryable provider-error. No dollar costs or *_MAX_BUDGET_USD caps apply on codex.
+are retryable provider-error. No dollar costs apply on codex.
 
 Examples:
   ticket-runner 207 --dry-run
@@ -155,7 +151,7 @@ Project config (.agents/ticket-runner.json, optional JSON; every key optional):
   gate            ["npx tsc --noEmit", "npm test"]   run before every ticket integration
   appVerification null                how to run the app for manual checks; named in every working prompt
   prBase, mergeMethod, verify, serve, ready, readyTimeout, serveEnv, browser
-The config, AGENTS.md, linkFiles and serveEnv (on claude-api also CLAUDE.md and the tracked
+The config, AGENTS.md, linkFiles and serveEnv (on claude also CLAUDE.md and the tracked
 files under .claude/; on codex also AGENTS.md and AGENTS.override.md at every depth, .codex/
 and .agents/) are protected: an agent changing one stops the run, and a ticket whose
 diff touches one is not integrated. AGENTS.md may carry a `## Ticket Runner`
@@ -182,16 +178,13 @@ prose that just says "blocked by" counts for nothing.
 State/logs: .scratch/run-tickets-commandcode/<parent>/ on every backend (state.json holds each
             attempt's spend; costs.md the table --post-costs posts)
 Worktrees:  .scratch/worktrees/<n> on branch cc/<parent>/<n>
-Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_ANTHROPIC_API_KEY,
-     TICKET_RUNNER_KEYCHAIN_SERVICE, WORKFLOW, IMPLEMENT_SKILL (pocock), AGENT_SKILLS_DIR (default
-     ~/.agents/skills), IMPL_MODEL, IMPL_EFFORT, IMPL_MAX_TURNS, IMPL_JOBS,
+Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, WORKFLOW, IMPLEMENT_SKILL (pocock),
+     AGENT_SKILLS_DIR (default ~/.agents/skills), IMPL_MODEL, IMPL_EFFORT, IMPL_MAX_TURNS, IMPL_JOBS,
      VERIFY_MODEL, VERIFY_EFFORT, VERIFY_MAX_TURNS (the verifier),
      TICKET_REVIEW_MODEL, TICKET_REVIEW_EFFORT, TICKET_REVIEW_MAX_TURNS,
      EPIC_REVIEW_MODEL, EPIC_REVIEW_EFFORT, EPIC_REVIEW_MAX_TURNS,
      LAUNCH_PLAN_MODEL, LAUNCH_PLAN_EFFORT, LAUNCH_PLAN_MAX_TURNS,
      ESCALATE_MODEL ('off' disables), ESCALATE_EFFORT, ESCALATE_MAX_TURNS,
-     IMPL_, TICKET_REVIEW_, EPIC_REVIEW_, VERIFY_, LAUNCH_PLAN_ and ESCALATE_MAX_BUDGET_USD (claude-api
-     only: a dollar cap on each session of that stage),
      GATE_CMDS and INSTALL_CMD (override the config's gate and install).
 """)
     p.add_argument("parent", type=positive)
@@ -201,7 +194,7 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
                    help="agent CLI and account of every session in the run: commandcode (default), or claude-api "
                    "(Claude Code on the company Anthropic API key), or codex (ChatGPT subscription)")
     p.add_argument("--model", default=os.getenv("IMPL_MODEL"),
-                   help="implementation model (default flash; sonnet on claude-api)")
+                   help="implementation model (default flash; sonnet on claude)")
     p.add_argument("--effort", default=os.getenv("IMPL_EFFORT"),
                    help="implementation effort; use 'none' to omit the flag")
     p.add_argument("--max-turns", type=positive, default=os.getenv("IMPL_MAX_TURNS", "500"))
@@ -220,17 +213,17 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
     p.add_argument("--no-verify", action="store_true", help="skip the verify stage")
     p.add_argument("--epic-review-model", default=os.getenv("EPIC_REVIEW_MODEL"),
                    help="one or two comma-separated, different epic reviewers (default deepseek,glm; opus on "
-                   "claude-api); two cross-examine each other's findings, one re-checks its own")
+                   "claude); two cross-examine each other's findings, one re-checks its own")
     p.add_argument("--epic-review-effort", default=os.getenv("EPIC_REVIEW_EFFORT"))
     p.add_argument("--epic-review-max-turns", type=positive, default=os.getenv("EPIC_REVIEW_MAX_TURNS", "500"))
     p.add_argument("--launch-plan-model", default=os.getenv("LAUNCH_PLAN_MODEL"),
                    help="model that writes the ship stage's launch plan (deepseek or glm, default deepseek; "
-                   "haiku on claude-api)")
+                   "haiku on claude)")
     p.add_argument("--launch-plan-effort", default=os.getenv("LAUNCH_PLAN_EFFORT"))
     p.add_argument("--launch-plan-max-turns", type=positive, default=os.getenv("LAUNCH_PLAN_MAX_TURNS", "500"))
     p.add_argument("--escalate-model", default=os.getenv("ESCALATE_MODEL"),
                    help="model that takes over a stuck ticket before it needs a human, or 'off' (default sol on "
-                   "codex, opus on claude-api, off on commandcode)")
+                   "codex, opus on claude, off on commandcode)")
     p.add_argument("--escalate-effort", default=os.getenv("ESCALATE_EFFORT"))
     p.add_argument("--escalate-max-turns", type=positive, default=os.getenv("ESCALATE_MAX_TURNS", "500"))
     p.add_argument("--dry-run", action="store_true")
@@ -258,7 +251,6 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
     if a.backend not in BACKENDS:  # argparse leaves an environment default unchecked
         p.error(f"--backend must be one of {', '.join(BACKENDS)}")
     # Defaults belong to the backend: a flag or env var always wins over them.
-    claude = a.backend == "claude-api"
     aliases = BACKEND_MODELS[a.backend]
     for prefix, defaults in BACKEND_DEFAULTS[a.backend].items():
         for field, value in zip(("model", "effort"), defaults):
@@ -278,17 +270,6 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
         p.error("--ticket-review-model needs at least one model")
     if a.effort is None:
         a.effort = "xhigh" if a.model == MODELS["muse"] else "max"
-    a.budgets = {}
-    for stage, env in BUDGETS.items() if claude else ():
-        raw = os.getenv(env)
-        if raw:
-            try:
-                value = float(raw)
-            except ValueError:
-                value = 0
-            if not 0 < value < float("inf"):
-                p.error(f"{env} must be a positive amount of US dollars")
-            a.budgets[stage] = value
     for model, effort in [(a.model, a.effort), (a.verify_model, a.verify_effort), (a.launch_plan_model, a.launch_plan_effort),
                           *([(a.escalate_model, a.escalate_effort)] if a.escalate_model else []),
                           *((m, a.epic_review_effort) for m in a.epic_review_models),
@@ -309,7 +290,7 @@ def stage_models(a):
             *([("escalate", a.escalate_model, a.escalate_effort, a.escalate_max_turns)] if a.escalate_model else [])]
 
 
-def backend_refusals(a, key):
+def backend_refusals(a):
     """Prove the run-wide model and account boundary before any spend, including on a dry run."""
     if a.backend == "codex":
         refusals = [f"{stage} model {model} is not a gpt-* model; codex runs every stage on the Codex CLI"
@@ -323,29 +304,26 @@ def backend_refusals(a, key):
         if not isinstance(auth, dict) or auth.get("auth_mode") != "chatgpt":
             refusals.append(f"ChatGPT login required at {a.codex_auth}: run `codex login`, then --resume")
         return refusals
-    refusals = [f"{stage} model {model} is not a Claude model, and claude-api runs every stage on Claude Code"
+    refusals = [f"{stage} model {model} is not a Claude model, and claude runs every stage on Claude Code"
                 for stage, model, _, _ in stage_models(a) if not re.fullmatch(r"claude-[a-z0-9][a-z0-9.-]*", model)]
-    if not shutil.which(os.getenv("CLAUDE_BIN", "claude")):
+    claude = ClaudeCode()
+    if not shutil.which(claude.binary):
         refusals.append("Claude Code binary not found; install it or set CLAUDE_BIN")
-    if not key:
-        service = os.getenv("TICKET_RUNNER_KEYCHAIN_SERVICE") or KEYCHAIN_SERVICE
-        refusals.append(f"no company Anthropic API key: store it with `security add-generic-password -s {service} "
-                        "-a \"$USER\" -w` (or set TICKET_RUNNER_ANTHROPIC_API_KEY)")
+    else:
+        refusals += filter(None, [claude.login_problem()])
     return refusals
 
 
-def plan_models(a, source):
-    """The backend and each stage's model for --dry-run; never the key itself, only where it came from."""
-    head = f"Backend: {a.backend}" + (f", company key from {source or 'nowhere'}" if a.backend == "claude-api" else "")
+def plan_models(a):
+    """The backend and each stage's model for --dry-run."""
+    head = f"Backend: {a.backend}" + (", your claude.ai subscription" if a.backend == "claude" else "")
     if a.backend == "codex":
         head += f", ChatGPT login from {a.codex_auth}"
     lines, seen = [paint(head, BOLD)], set()
     for stage, model, effort, turns in stage_models(a):
         if stage == "ticket review" and a.workflow != "osmani":
             continue
-        budget = a.budgets.get(stage)
-        lines.append(f"  {stage if stage not in seen else '':<13} {model} @ {effort}, {turns} turns"
-                     + (f", budget {dollars(budget)}" if budget else ""))
+        lines.append(f"  {stage if stage not in seen else '':<13} {model} @ {effort}, {turns} turns")
         seen.add(stage)
     return "\n".join(lines)
 
@@ -370,9 +348,6 @@ def main():
     if a.backend == "codex":
         a.codex_auth, a.codex_binary = codex_auth(), os.getenv("CODEX_BIN", "codex")
         strip_codex_auth()
-    # Capture before any git/GitHub/install child; even other backends must not inherit the override.
-    override = os.environ.pop("TICKET_RUNNER_ANTHROPIC_API_KEY", "").strip()
-    a.company_credentials = ((override, "env") if override else company_key()) if a.backend == "claude-api" else (None, None)
     root = Path(command("git", "rev-parse", "--show-toplevel"))
     os.chdir(root)
     folder = root / ".scratch" / "run-tickets-commandcode" / str(a.parent)
@@ -405,29 +380,27 @@ def run_checkout(a, root, folder):
     busy = [n for n in order if tickets[n]["state"] != "CLOSED"
             and data.get(str(n), {}).get("status") not in (None, "done")]
     # A part-way ticket's saved session was started under the other workflow's prompts, or by the other
-    # backend's CLI, which cannot resume it. State from before the backend was saved is commandcode's.
+    # backend's CLI, which cannot resume it. State from before the backend was saved is commandcode's. A removed
+    # backend has nothing to finish on, so those tickets move across and start fresh sessions.
     switches = [("workflow", saved, a.workflow),
                 ("backend", data.get("_meta", {}).get("backend") or ("commandcode" if data.get("_meta") else None),
                  a.backend)]
     for kind, was, now in switches:
-        if was and was != now and busy:
+        if was and was != now and busy and was != REMOVED_BACKEND:
             raise RuntimeError(f"#{a.parent} runs the {was} {kind} and {' '.join(f'#{n}' for n in busy)} "
                                f"{'is' if len(busy) == 1 else 'are'} part-way through; finish them with "
                                f"--{kind} {was}, or reset them, before switching to {now}")
     saved_backend = data.get("_meta", {}).get("backend")
     if saved_backend and saved_backend != a.backend and not a.backend_named:
-        # Resuming a claude-api epic without the flag would otherwise move it onto CommandCode's account.
+        # Reached only if another run saved a different backend after this one read it, before the lock.
         raise RuntimeError(f"#{a.parent} runs on the {saved_backend} backend; pass --backend {saved_backend} to "
                            f"continue it (or --backend {a.backend} to switch)")
-    claude = a.backend == "claude-api"
-    # The company key is read once, here, and handed only to the runner's Claude Code children.
-    key, source = a.company_credentials
     osmani = a.workflow == "osmani"
     review = "off" if a.no_epic_review else (f"{' + '.join(a.epic_review_models)} @ {a.epic_review_effort}, "
                                              f"{a.epic_review_max_turns} turns")
     ticket_review = (f"; ticket review: {'/'.join(a.ticket_review_models)} @ {a.ticket_review_effort}, "
                      f"{a.ticket_review_max_turns} turns") if osmani else ""
-    backend = f"Backend: claude-api (company key from {source or 'nowhere'}). " if claude else ""
+    backend = "Backend: claude (your claude.ai subscription). " if a.backend == "claude" else ""
     say(f"{backend}Workflow: {a.workflow}. Implement: {a.model}/{a.effort}, {a.max_turns} turns, {a.jobs} at once"
         f"{ticket_review}; epic review: {review}", DIM)
     if osmani and a.model in a.ticket_review_models:
@@ -446,8 +419,7 @@ def run_checkout(a, root, folder):
                 f"/tmp/agent-skills && git -C /tmp/agent-skills sparse-checkout set references && "
                 f"cp -R /tmp/agent-skills/references {skills_dir.parent}/"] if missing else []
     refusals += stage_refusals(a, cfg, root)
-    if a.backend != "commandcode":
-        refusals += backend_refusals(a, key)
+    refusals += backend_refusals(a)
     if osmani:
         if not a.epic_only:
             parent_body = gh_json("issue", "view", str(a.parent), "--json", "body")["body"] or ""
@@ -463,7 +435,7 @@ def run_checkout(a, root, folder):
         done = {n for n in order if tickets[n]["state"] == "CLOSED" or data.get(str(n), {}).get("status") == "done"}
         say(render_graph(levels, tickets, classify({n: t["blockers"] for n, t in tickets.items()}, done)))
         say(plan_stages(a, cfg, data, [n for n in order if n not in done], command("git", "rev-parse", "HEAD")))
-        say(plan_models(a, source))
+        say(plan_models(a))
         say("Dry run: no agents, file writes or GitHub edits.", DIM)
         for item in refusals:
             say(f"A real run would refuse: {item}", RED, err=True)
@@ -493,7 +465,7 @@ def run_checkout(a, root, folder):
     # Fix tickets from the epic review run through the implement skill too, even under --epic-only.
     if not osmani and not (a.epic_only and a.no_epic_review) and not skill.is_file():
         raise RuntimeError(f"Implementation skill not found: {skill}")
-    return Runner(a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg, key=key).execute()
+    return Runner(a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg).execute()
 
 
 def entrypoint():

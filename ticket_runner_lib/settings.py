@@ -26,9 +26,11 @@ EFFORTS = {
     CLAUDE_MODEL: {"low", "medium", "high", "xhigh", "max"},
 }
 WORKFLOWS = ("pocock", "osmani")
-# The agent CLI and account of a whole run (docs/adr/0002-*): CommandCode, or Claude Code billed to a
-# company Anthropic API key, or Codex on the operator's ChatGPT subscription.
-BACKENDS = ("commandcode", "claude-api", "codex")
+# The agent CLI and account of a whole run: CommandCode, or Claude Code on the operator's subscription
+# (docs/adr/0004-*), or Codex on their ChatGPT subscription.
+BACKENDS = ("commandcode", "claude", "codex")
+# The company API key backend docs/adr/0002-* described: a saved epic can still name it.
+REMOVED_BACKEND = "claude-api"
 CODEX_MODELS = {"luna": "gpt-6-luna", "sol": "gpt-6.1-sol"}
 CODEX_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 EFFORTS.update({CODEX_MODELS["luna"]: CODEX_EFFORTS,
@@ -36,23 +38,14 @@ EFFORTS.update({CODEX_MODELS["luna"]: CODEX_EFFORTS,
 CLAUDE_MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5", "haiku": "claude-haiku-5-5"}
 CLAUDE_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 EFFORTS.update({m: CLAUDE_EFFORTS for m in CLAUDE_MODELS.values()})
-# Per-stage spend caps (claude-api only), passed to that stage's sessions as --max-budget-usd.
-BUDGETS = {"implement": "IMPL_MAX_BUDGET_USD", "ticket review": "TICKET_REVIEW_MAX_BUDGET_USD",
-           "epic review": "EPIC_REVIEW_MAX_BUDGET_USD", "verify": "VERIFY_MAX_BUDGET_USD",
-           "launch plan": "LAUNCH_PLAN_MAX_BUDGET_USD", "escalate": "ESCALATE_MAX_BUDGET_USD"}
-# Sessions that spend another stage's budget: they run on that stage's model.
-BUDGET_OF = {"fix": "implement", "integration repair": "implement", "verify repair": "implement",
-             "repair review": "epic review"}
-KEYCHAIN_SERVICE = "krim-anthropic-api-key"
-# Removed from every Claude Code session's environment, so nothing but the company key can authenticate it.
-# CLAUDE_CODE_OAUTH_TOKEN is a subscription token that works from any config directory.
+# Removed from every Claude Code session's environment, so nothing but the operator's login can authenticate it.
+# CLAUDE_CONFIG_DIR is here too: the login belongs to the operator's normal config (docs/adr/0004-*).
 FOREIGN_AUTH = ("TICKET_RUNNER_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
                 "CLAUDE_CONFIG_DIR", "CCR_OAUTH_TOKEN_FILE", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
                 "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR")
-# The runner's Claude Code config directory (relative to the project root) and the settings seeded into it.
-CLAUDE_CONFIG_DIR = ".scratch/claude-config"
+# Passed inline to every session: no co-author attribution, no auto-memory carried from one session into the next.
 CLAUDE_SETTINGS = {"attribution": {"commit": "", "pr": ""}, "autoMemoryEnabled": False}
-# Claude Code reads these, so on claude-api an agent changing one changes what later sessions are told.
+# Claude Code reads these, so on claude an agent changing one changes what later sessions are told.
 CLAUDE_PROTECTED = ("CLAUDE.md", ".claude/", "CLAUDE.local.md",
                     ":(glob)**/CLAUDE.md", ":(glob)**/CLAUDE.local.md")
 CODEX_HOME_DIR = ".scratch/codex-home"
@@ -92,13 +85,14 @@ EPIC_REVIEWERS = "deepseek,glm"
 COMMANDCODE_DEFAULTS = {"": ("flash", None), "ticket_review_": ("luna,glm", "high"), "verify_": ("luna", "high"),
                         "epic_review_": (EPIC_REVIEWERS, "high"), "launch_plan_": ("deepseek", "high"),
                         "escalate_": ("off", "high")}
-CLAUDE_DEFAULTS = {"": ("sonnet", "medium"), "ticket_review_": ("opus", "medium"), "verify_": ("sonnet", "medium"),
-                   "epic_review_": ("opus", "high"), "launch_plan_": ("haiku", "low"), "escalate_": ("opus", "high")}
+# Sonnet on every ticket, Opus saved for the epic review and stuck tickets: the limit here is the plan's usage.
+CLAUDE_DEFAULTS = {"": ("sonnet", "medium"), "ticket_review_": ("sonnet", "high"), "verify_": ("sonnet", "medium"),
+                   "epic_review_": ("opus", "medium"), "launch_plan_": ("haiku", "low"), "escalate_": ("opus", "medium")}
 CODEX_DEFAULTS = {"": ("luna", "high"), "ticket_review_": ("luna", "high"), "verify_": ("luna", "high"),
                   "epic_review_": ("sol", "high"), "launch_plan_": ("luna", "low"), "escalate_": ("sol", "medium")}
-BACKEND_DEFAULTS = {"commandcode": COMMANDCODE_DEFAULTS, "claude-api": CLAUDE_DEFAULTS, "codex": CODEX_DEFAULTS}
-BACKEND_MODELS = {"commandcode": MODELS, "claude-api": CLAUDE_MODELS, "codex": CODEX_MODELS}
-BACKEND_EFFORTS = {"commandcode": None, "claude-api": CLAUDE_EFFORTS, "codex": CODEX_EFFORTS}
+BACKEND_DEFAULTS = {"commandcode": COMMANDCODE_DEFAULTS, "claude": CLAUDE_DEFAULTS, "codex": CODEX_DEFAULTS}
+BACKEND_MODELS = {"commandcode": MODELS, "claude": CLAUDE_MODELS, "codex": CODEX_MODELS}
+BACKEND_EFFORTS = {"commandcode": None, "claude": CLAUDE_EFFORTS, "codex": CODEX_EFFORTS}
 # Bumped whenever the shape of a saved epic review changes; an older record is reviewed again.
 REVIEW_PROTOCOL = 3
 FIX_LABEL = "epic-review-fix"
@@ -118,8 +112,7 @@ BROWSER_MCP = {"mcpServers": {BROWSER_SERVER: {"command": "npx",
 BROWSER_ADD = (f"command-code mcp add --scope user --transport stdio {BROWSER_SERVER} -- "
                "npx -y chrome-devtools-mcp@latest --isolated")
 OSMANI_SOURCE = "https://github.com/addyosmani/agent-skills.git"
-# budget-cap: the session spent its stage's budget, which says nothing about the ticket.
-RETRYABLE = {"turn-cap", "budget-cap", "provider-error", "interrupted", "in-progress", "error"}
+RETRYABLE = {"turn-cap", "provider-error", "interrupted", "in-progress", "error"}
 # Optional project config, relative to the project root. Every key is optional; these are the defaults.
 CONFIG = ".agents/ticket-runner.json"
 DEFAULTS = {"install": "npm ci", "lockfiles": ["package-lock.json"], "dependencyDirs": ["node_modules"],

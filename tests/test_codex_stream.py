@@ -103,7 +103,7 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(env['CODEX_HOME'], '/runner')
         self.assertFalse(set(leaked) & set(env))
         for session in (None, 'saved-thread'):
-            argv = backend.argv('gpt-6-luna', 'high', 3, 'prompt', session, budget=5, browser=True)
+            argv = backend.argv('gpt-6-luna', 'high', 3, 'prompt', session, browser=True)
             self.assertEqual(argv[1:3], ['exec', 'resume'] if session else ['exec', '--json'])
             self.assertIn('--dangerously-bypass-approvals-and-sandbox', argv)
             self.assertIn('model_reasoning_effort="high"', argv)

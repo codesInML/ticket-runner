@@ -1,15 +1,12 @@
 """Offline regression checks for backend isolation, cancellation and durable costs."""
 import os
-from pathlib import Path
-import subprocess
-import tempfile
 import threading
 import time
 import unittest
 from unittest.mock import patch
 
 from ticket_runner_lib.agents import AgentProcesses
-from ticket_runner_lib.backends import ClaudeCode, ClaudeStream, company_key
+from ticket_runner_lib.backends import ClaudeCode, ClaudeStream
 from ticket_runner_lib.settings import Fatal, Stop
 
 
@@ -31,7 +28,7 @@ class Harness(AgentProcesses):
 
 class ClaudeRegressions(unittest.TestCase):
     def test_project_settings_cannot_supply_authentication(self):
-        argv = ClaudeCode('fake', Path('/config')).argv('sonnet', None, 1, 'hello')
+        argv = ClaudeCode().argv('sonnet', None, 1, 'hello')
         self.assertIn('--setting-sources', argv)
         self.assertEqual(argv[argv.index('--setting-sources') + 1], 'user')
 
@@ -39,7 +36,7 @@ class ClaudeRegressions(unittest.TestCase):
         selectors = {f'CLAUDE_CODE_USE_{name}': '1' for name in
                      ('ANTHROPIC_AWS', 'ANTHROPIC_GOOGLE_CLOUD', 'MANTLE', 'GATEWAY', 'FUTURE_PROVIDER')}
         with patch.dict(os.environ, selectors):
-            env = ClaudeCode('fake', Path('/config')).env()
+            env = ClaudeCode().env()
         self.assertFalse(set(selectors) & set(env))
 
     def test_authentication_headers_and_token_handoffs_are_removed(self):
@@ -47,25 +44,19 @@ class ClaudeRegressions(unittest.TestCase):
                   'CCR_OAUTH_TOKEN_FILE', 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
                   'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR', 'CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR')}
         with patch.dict(os.environ, leaked):
-            env = ClaudeCode('company', Path('/config')).env()
+            env = ClaudeCode().env()
         self.assertFalse(set(leaked) & set(env))
-        self.assertEqual(env['ANTHROPIC_API_KEY'], 'company')
 
-    def test_init_refuses_other_providers_even_with_the_company_key_source(self):
+    def test_init_refuses_other_providers_even_on_the_subscription_login(self):
         for provider in ('anthropicAws', 'vertex', 'gateway'):
             stream = ClaudeStream()
-            stream.feed({'type': 'system', 'subtype': 'init', 'apiKeySource': 'ANTHROPIC_API_KEY',
+            stream.feed({'type': 'system', 'subtype': 'init', 'apiKeySource': 'none',
                          'apiProvider': provider})
             self.assertIsNotNone(stream.refusal)
         stream = ClaudeStream()
-        stream.feed({'type': 'system', 'subtype': 'init', 'apiKeySource': 'ANTHROPIC_API_KEY',
+        stream.feed({'type': 'system', 'subtype': 'init', 'apiKeySource': 'none',
                      'apiProvider': 'firstParty'})
         self.assertIsNone(stream.refusal)
-
-    def test_company_key_capture_removes_the_override(self):
-        with patch.dict(os.environ, {'TICKET_RUNNER_ANTHROPIC_API_KEY': ' fake '}):
-            self.assertEqual(company_key(), ('fake', 'env'))
-            self.assertNotIn('TICKET_RUNNER_ANTHROPIC_API_KEY', os.environ)
 
     def test_fatal_parallel_job_cancels_sibling_child_and_preserves_failure(self):
         runner = Harness()
@@ -79,7 +70,7 @@ class ClaudeRegressions(unittest.TestCase):
                     raise Stop()
             finally:
                 runner.reap(child)
-        failure = Fatal('company billing failure')
+        failure = Fatal('account failure')
         def failing():
             self.assertTrue(started.wait(3))
             raise failure
