@@ -267,7 +267,7 @@ class GitHubSync:
             if not rv.get("closeAt"):
                 return []
             closed = rv.get("closed", [])
-            return [n for n in self.order if n not in closed and self.tickets[n]["state"] != "CLOSED"
+            return [n for n in self.order if n not in closed and self.tickets.get(n, {}).get("state") != "CLOSED"
                     and f"close:{n}" not in self.sync_problems]
 
     def sync_closes(self):

@@ -179,7 +179,7 @@ exactly one line for your report as it stands: {line}.
                 texts[i] = f"{texts[i].rstrip()}\n{reply.strip().splitlines()[-1]}" if reply.strip() else texts[i]
             self.guard()
         if dirty(self.tree) or git(self.tree, "rev-parse", "HEAD") != head:
-            self.epic_fail(rv, "needs-human", "an epic reviewer changed the main worktree, but the review must be "
+            self.epic_fail(rv, "needs-human", "an epic reviewer changed the epic worktree, but the review must be "
                            "read-only; inspect it, then --epic-only")
             return None
         stopped = [r for r in todo if r["status"] != "reported"]

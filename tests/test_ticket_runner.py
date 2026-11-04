@@ -820,6 +820,19 @@ sys.exit(8 if cap else 0)
         self.assertIn('has uncommitted changes; left in place', result.stdout)
         self.assertTrue((self.root / '.scratch/epics/207/stray.txt').exists())
 
+    def test_the_epic_worktree_installs_when_its_lockfile_differs_from_the_folder_it_cloned_from(self):
+        (self.root / 'deps.lock').write_text('branch\n')
+        self.git('add', 'deps.lock')
+        self.configure(lockfiles=['deps.lock'], install='echo installed > installed.txt', gate=['true'])
+        with (self.root / '.gitignore').open('a') as out:
+            out.write('installed.txt\n')
+        self.git('add', '.gitignore')
+        self.git('commit', '-qm', 'Lockfile')
+        self.free_main_folder()
+        (self.root / 'deps.lock').write_text('another branch\n')
+        self.assertEqual(self.run_script('--only', '209').returncode, 0)
+        self.assertTrue((self.root / '.scratch/epics/207/installed.txt').exists())
+
     def test_two_epics_run_at_once_in_one_checkout(self):
         def other_epic(env):
             issues = [{"number": 509, "title": "Other", "body": "Parent #507", "state": "OPEN"}]

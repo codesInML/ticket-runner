@@ -88,7 +88,7 @@ Read-only: do not edit files, commit, change branches, push, open pull requests,
                              stage="launch plan")
         self.guard()
         if dirty(self.tree) or git(self.tree, "rev-parse", "HEAD") != head:
-            self.epic_fail(rec, "needs-human", "the launch plan agent changed the main worktree, but it must be "
+            self.epic_fail(rec, "needs-human", "the launch plan agent changed the epic worktree, but it must be "
                            "read-only; inspect it, then --epic-only")
             return False
         if plan["status"] != "reported":

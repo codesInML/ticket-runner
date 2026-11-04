@@ -123,8 +123,9 @@ with a fresh cap. Usage limits and signed-out logins stop every ticket; request 
 are retryable provider-error. No dollar costs or *_MAX_BUDGET_USD caps apply on codex.
 
 Examples:
-  ticket-runner 207 --dry-run
-  ticket-runner 207 --jobs 2 --model muse
+  ticket-runner 207 --branch feat/payments --dry-run
+  ticket-runner 207 --branch feat/payments --jobs 2 --model muse
+  ticket-runner 208 --branch feat/refunds --from feat/payments
   ticket-runner 207 --resume --max-turns 1000
   ticket-runner 207 --only 209
   ticket-runner 207 --epic-only               (epic review, verify, ship)
@@ -142,9 +143,14 @@ must not be XL or likely touch more than 8 files, and must list every dependency
 switching either is refused while any ticket is part-way through, and a saved backend is only
 left when --backend (or BACKEND) names another.
 
-Requirements: a clean main worktree on the epic branch, and AGENTS.md committed
-on it (ticket worktrees only see committed files). Leave the main worktree alone
-while the runner works; it fast-forwards the epic branch there.
+Branches: --branch names the epic branch on an epic's first run and is saved with it. A branch that
+does not exist starts from the latest pull request target on origin, or from --from. The target is
+--pr-base, then --from, then the config's prBase, then origin's default branch, and is saved too.
+Each epic runs in its own worktree (.scratch/epics/<parent>), so the folder you run this from is
+never touched and several epics can run at once. AGENTS.md must be committed on the branch (ticket
+worktrees only see committed files). The worktree goes when a run succeeds, freeing the branch for you
+to check out; it stays while the run waits, after a failure, after --only, and while it holds uncommitted
+changes. No two folders can have a branch checked out, so move yours off the epic branch first.
 
 A ticket graph (done, running, ready, waiting, failed, held per wave) prints
 before the run starts and again whenever a ticket finishes; --dry-run shows it too.
@@ -168,15 +174,19 @@ Epic stages: --epic-only runs only them (and any fix tickets); --no-verify,
 --no-epic-review and --no-ship skip one each. No epic review means no ship; --merge refuses
 unless verify ran and passed and the epic review said SHIP for the head (through the repair
 review after a verify repair). --resume also continues an interrupted epic reviewer,
-verifier, verify repair, repair review or launch plan session. A needs-human verify keeps .scratch/worktrees/verify
-(branch cc/<parent>/verify): fix it there, commit, then --epic-only. A needs-human epic review: fix
-it on the epic branch, commit, then --epic-only gives those commits the repair review.
+verifier, verify repair, repair review or launch plan session. A needs-human verify keeps .scratch/worktrees/verify-<parent>
+(branch cc/<parent>/verify): fix it there, commit, and unblock the epic. A needs-human epic review: fix
+it in the epic worktree, commit, and unblock it: those commits get the repair review.
 
 Merged (done) and closed tickets are always skipped. --resume continues the saved
 agent session of an unfinished ticket in its kept worktree, and retries
-integration of a ticket that finished but did not merge. Fix a needs-human ticket
-in its worktree (commit, finish any rebase), then --resume. For awaiting-human,
-answer on the issue, then --resume --only <n>. No changes are discarded.
+integration of a ticket that finished but did not merge. No changes are discarded.
+
+Unblocking: a ticket or epic that needs a person gets the needs-human label, and the run stays alive. Fix it
+(commit, finish any rebase) or answer on the issue, then remove the label: the run continues it within about 30
+seconds, with no time limit on waiting. --resume follows the same label, waiting on one still labelled and
+continuing one that is not. --resume --only <n> continues a ticket regardless, and --epic-only --force runs the
+epic stages regardless. Other endings such as turn-cap and error do not wait, and need --resume.
 Sub-tickets are the parent's native GitHub sub-issues plus any issue naming the parent
 in a "## Parent" section or a "Parent…: #N" line. Blockers are the union of native
 "blocked by" links, a "## Blocked by" section, and labelled "Blocked by:" lines;
@@ -194,7 +204,10 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
      ESCALATE_MODEL ('off' disables), ESCALATE_EFFORT, ESCALATE_MAX_TURNS,
      IMPL_, TICKET_REVIEW_, EPIC_REVIEW_, VERIFY_, LAUNCH_PLAN_ and ESCALATE_MAX_BUDGET_USD (claude-api
      only: a dollar cap on each session of that stage),
-     GATE_CMDS and INSTALL_CMD (override the config's gate and install).
+     GATE_CMDS and INSTALL_CMD (override the config's gate and install),
+     TICKET_RUNNER_POLL_SECONDS, TICKET_RUNNER_REMIND_SECONDS and TICKET_RUNNER_FLUSH_SECONDS (how often GitHub
+     is compared and labels read, how often a wait repeats itself, and how long a finished run tries to send
+     what GitHub still lacks), TICKET_RUNNER_NO_WAIT (exit instead of waiting on a person; for tests).
 """)
     p.add_argument("parent", type=positive)
     p.add_argument("--workflow", choices=WORKFLOWS, default=os.getenv("WORKFLOW"),
@@ -430,6 +443,17 @@ def branch_refusals(a, root, meta, tree):
     return refusals + list(filter(None, [blocked_by_checkout(root, branch, tree)]))
 
 
+def install_if_stale(root, tree, cfg):
+    """Dependencies are cloned from the operator's folder, which may be on a branch with another lockfile."""
+    def read(folder, name):
+        return (folder / name).read_bytes() if (folder / name).is_file() else None
+    if any(read(root, name) != read(tree, name) for name in cfg["lockfiles"]):
+        install = os.getenv("INSTALL_CMD") or cfg["install"]
+        say(f"The lockfile here differs from {os.path.relpath(tree)}; running {install} there", BOLD)
+        if subprocess.run(install, shell=True, cwd=tree).returncode:
+            raise RuntimeError(f"{install} failed in {os.path.relpath(tree)}; fix dependencies there, then run this again")
+
+
 def epic_worktree(a, root, cfg, meta, branch, target):
     """The epic branch in its own worktree: created, or checked, and provisioned."""
     tree = tree_path(root, a.parent)
@@ -447,6 +471,8 @@ def epic_worktree(a, root, cfg, meta, branch, target):
         tree.parent.mkdir(parents=True, exist_ok=True)
         attempt(root, "worktree", "prune")
         command("git", "worktree", "add", "-q", str(tree), branch, cwd=root)
+        provision_tree(root, root, tree, cfg)
+        install_if_stale(root, tree, cfg)
     provision_tree(root, root, tree, cfg)
     return tree
 
