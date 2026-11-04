@@ -58,7 +58,7 @@ class Shipping:
         if plan.get("status") == "done" and plan.get("head") == head and (sdir / "launch-plan.md").exists():
             say(f"Launch plan already written for {head[:8]}: {os.path.relpath(sdir / 'launch-plan.md')}", DIM)
             return True
-        session = plan.get("sessionId") if a.resume and plan.get("status") in RETRYABLE \
+        session = plan.get("sessionId") if self.resuming and plan.get("status") in RETRYABLE \
             and plan.get("head") == head else None
         self.update(plan, drop=() if session else ("sessionId",))
         base, report = self.data["_meta"]["epicBase"], self.folder / "verify" / "report.md"

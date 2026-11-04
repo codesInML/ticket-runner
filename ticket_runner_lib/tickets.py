@@ -19,7 +19,7 @@ class TicketImplementation:
             tdir = self.folder / str(n)
             tdir.mkdir(parents=True, exist_ok=True)
             (tdir / "ticket.md").write_text(f"# #{n} — {self.tickets[n]['title']}\n\n{self.tickets[n]['body']}")
-            phase = record.get("phase") if self.a.resume else None
+            phase = record.get("phase") if self.continuing(n) else None
             if phase == "escalate":
                 self.resume_escalation(n, record, tdir)
             elif phase not in ("review", "fix", "integrate"):
@@ -43,14 +43,14 @@ class TicketImplementation:
             self.events.put(n)
 
     def fail(self, n, record, status, reason):
-        self.update(record, status=status, reason=reason)
+        self.update(record, status=status, reason=reason, drop=("unblocked",))
         self.nudge()
         say(f"#{n} {status}: {reason}", YELLOW, BOLD)
 
     def implement(self, n, record, tdir):
         branch, wt = self.branch(n), self.worktrees / str(n)
         answered = record.get("status") == "awaiting-human"
-        session = record.get("sessionId") if self.a.resume and (
+        session = record.get("sessionId") if self.continuing(n) and (
             record.get("status") in RETRYABLE or answered) else None
         with self.integration:
             if self.stopping.is_set():
@@ -163,7 +163,7 @@ exactly one line for the work as it stands: STATUS=COMPLETE, STATUS=NEEDS_HUMAN,
         with self.state:
             rec = record.setdefault("escalation", {}).setdefault(kind, {})
         head = git(wt, "rev-parse", "HEAD")
-        session = rec.get("sessionId") if self.a.resume and (rec.get("status") in RETRYABLE or answered) \
+        session = rec.get("sessionId") if self.continuing(n) and (rec.get("status") in RETRYABLE or answered) \
             and rec.get("head") == head else None
         self.update(rec, why=why, reports=[str(r) for r in reports], **review, drop=() if session else ("sessionId",))
         self.update(record, status="in-progress", phase="escalate", escalating=kind)

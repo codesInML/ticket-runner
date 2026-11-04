@@ -241,6 +241,8 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
                    "target; also becomes that target unless --pr-base says otherwise")
     p.add_argument("--pr-base", help="where the epic's pull request goes; saved with the epic (default: --from, then "
                    "the config's prBase, then origin's default branch)")
+    p.add_argument("--force", action="store_true", help="with --epic-only: run the epic stages now, even while the epic "
+                   "issue still has its needs-human label")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--only", type=positive)
@@ -256,6 +258,8 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, TICKET_RUNNER_
     a = p.parse_args()
     if a.epic_only and a.only:
         p.error("--epic-only cannot be combined with --only")
+    if a.force and not a.epic_only:
+        p.error("--force goes with --epic-only; for a ticket use --resume --only <n>")
     if a.epic_only and a.no_verify and a.no_epic_review:
         p.error("--epic-only with --no-verify and --no-epic-review leaves nothing to run")
     if a.merge and (a.only or a.no_verify or a.no_epic_review or a.no_ship):

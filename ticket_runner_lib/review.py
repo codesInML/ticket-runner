@@ -23,7 +23,7 @@ class Reviews:
             rec = record.setdefault("ticketReview", {})
         if record.get("phase") == "fix" and not self.fix(n, record, rec, tdir):
             return
-        if self.a.resume and record.get("status") == "needs-human" and rec.get("status") == "fail":
+        if self.continuing(n) and record.get("status") == "needs-human" and rec.get("status") == "fail":
             # A person fixed the last review's findings in the worktree: the next round re-reviews against them.
             last = rec.get("round", 1)
             self.update(rec, round=last + 1, previousReport=str(tdir / "review" / f"round-{last}" / "final.txt"),
@@ -31,7 +31,7 @@ class Reviews:
         while True:
             round_, model = rec.get("round", 1), rec.get("model") or self.reviewer_for(n)
             head = git(wt, "rev-parse", "HEAD")
-            session = rec.get("sessionId") if self.a.resume and rec.get("status") in RETRYABLE \
+            session = rec.get("sessionId") if self.continuing(n) and rec.get("status") in RETRYABLE \
                 and rec.get("head") == head else None
             since = rec.get("reviewedHead") if round_ > 1 else None
             self.update(record, status="in-review", phase="review")

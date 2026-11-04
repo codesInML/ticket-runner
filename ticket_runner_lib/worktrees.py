@@ -144,7 +144,7 @@ or modify the runner or {self.hands_off}.
 
     def finish(self, n, record, head):
         """A ticket's terminal state: merged, or complete without commits and so nothing to integrate."""
-        self.update(record, status="done", head=head, drop=("reason",))
+        self.update(record, status="done", head=head, drop=("reason", "unblocked"))
         self.nudge()
 
     def cleanup(self, n):

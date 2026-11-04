@@ -164,6 +164,7 @@ def plan_stages(a, cfg, data, open_tickets, head):
         lines.append("  ship         " + (f"pull request already open at {head[:8]}" if held("_ship", ("pr-open", "merged"))
                                           else f"launch plan ({a.launch_plan_model}), push, pull request into {into}")
                      + merge + " (only on a SHIP verdict)")
+    lines.append("A ticket or the epic that needs a person waits; removing needs-human from its issue continues it.")
     return "\n".join(lines)
 
 

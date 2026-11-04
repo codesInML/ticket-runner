@@ -148,7 +148,7 @@ class EpicReview:
         jobs = []
         for r in todo:
             # Later steps resume the reviewer's own session: it already knows the code.
-            retry = a.resume and r.get("status") in RETRYABLE and r.get("step") == step
+            retry = self.resuming and r.get("status") in RETRYABLE and r.get("step") == step
             session = r.get("sessionId") if step != "review" or retry else None
             self.update(r, step=step, drop=() if session else ("sessionId",))
             folder, text = self.review_dir() / r["dir"] / step, prompt(r)

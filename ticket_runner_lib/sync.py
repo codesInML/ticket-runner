@@ -6,6 +6,7 @@ needs nothing special, and a person's edit on GitHub is never treated as a mista
 """
 
 import hashlib
+import json
 import os
 import threading
 import time
@@ -29,7 +30,9 @@ class GitHubSync:
         self.poll = seconds("TICKET_RUNNER_POLL_SECONDS", 30)
         self.flush_limit = seconds("TICKET_RUNNER_FLUSH_SECONDS", 120)
         self.sync_wake, self.sync_stop, self.sync_thread = threading.Event(), threading.Event(), None
-        self.sync_problems, self.sync_down = set(), False
+        self.sync_problems, self.sync_down, self.sync_lock = set(), False, threading.Lock()
+        # What the scheduler is waiting on a person for, and when to look at the labels next.
+        self.watching, self.next_watch = set(), 0
 
     def nudge(self):
         self.sync_wake.set()
@@ -51,12 +54,50 @@ class GitHubSync:
             self.sync_wake.wait(self.poll)
             self.sync_wake.clear()
 
-    def sync_tick(self):
-        self.sync_pass()
+    def sync_tick(self, watch=False):
+        with self.sync_lock:
+            self.sync_pass()
+            if watch or time.monotonic() >= self.next_watch:
+                self.next_watch = time.monotonic() + self.poll
+                self.watch_pass()
+
+    def watch_pass(self):
+        """Removing needs-human unblocks. A label the runner never saw on GitHub, or an unreadable issue, says nothing."""
+        for n in sorted(self.watching):
+            self.watch(n, self.data.get(str(n)), lambda view: self.tickets[n].update(
+                {k: view[k] for k in ("title", "body", "state") if k in view}))
+        if self.data.get("_hold"):
+            self.watch(self.a.parent, self.data["_hold"], lambda view: None)
+
+    def watch(self, n, record, unblocked):
+        if not record or record.get("unblocked"):
+            return
+        view = self.issue_view(n)
+        if view is None:
+            return
+        with self.state:
+            confirmed = self.github().setdefault("labels", {})
+            if view.get("state") == "CLOSED" and n != self.a.parent:
+                self.tickets[n]["state"] = "CLOSED"  # Closed by hand: nothing left to wait for.
+            elif "needs-human" in [label.get("name") for label in view.get("labels", [])]:
+                confirmed[str(n)] = "needs-human"
+            elif confirmed.get(str(n)) == "needs-human":
+                unblocked(view)
+                record["unblocked"] = True
+                del confirmed[str(n)]
+            self.persist()
+
+    @staticmethod
+    def issue_view(n):
+        found = gh("issue", "view", str(n), "--json", "labels,state,title,body")
+        try:
+            return None if found.returncode else json.loads(found.stdout)
+        except ValueError:
+            return None
 
     def sync_pass(self):
         """Send what GitHub lacks; stop at the first sign GitHub is down, as the next pass tries everything again."""
-        for step in (self.sync_labels, self.sync_links, self.sync_closes, self.sync_findings, self.sync_costs):
+        for step in (self.sync_labels, self.sync_epic_label, self.sync_links, self.sync_closes, self.sync_findings, self.sync_costs):
             if not step():
                 return
         if self.sync_down:
@@ -133,6 +174,23 @@ class GitHubSync:
             with self.state:
                 self.github().setdefault("labels", {})[str(n)] = label
                 self.persist()
+        return True
+
+    def stale_epic_label(self):
+        """--force reran the epic stages without a person removing its label, so the label is the runner's to clear."""
+        with self.state:
+            return "_hold" not in self.data and "epic label" not in self.sync_problems \
+                and self.github().get("labels", {}).get(str(self.a.parent)) == "needs-human"
+
+    def sync_epic_label(self):
+        if not self.stale_epic_label():
+            return True
+        result = gh("issue", "edit", str(self.a.parent), "--remove-label", "needs-human")
+        if result.returncode and not missing_labels(result.stderr):
+            return not self.undelivered("epic label", f"remove needs-human from #{self.a.parent}", result)
+        with self.state:
+            self.github()["labels"].pop(str(self.a.parent), None)
+            self.persist()
         return True
 
     def apply_label(self, n, add, remove):
@@ -273,6 +331,7 @@ class GitHubSync:
     def sync_pending(self):
         """What GitHub still lacks, in words; real errors were already reported and are not retried this run."""
         found = [f"#{n} {label}" for n, label in self.wanted_labels().items()]
+        found += [f"removing needs-human from #{self.a.parent}"] * self.stale_epic_label()
         with self.state:
             found += [f"fix ticket #{key} link" for key, link in self.github().get("links", {}).items()
                       if f"link:{key}" not in self.sync_problems and not (link.get("label") and link.get("linked"))]

@@ -6,6 +6,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 
 from .agents import AgentProcesses
 from .backends import ClaudeCode, Codex, CommandCode
@@ -58,6 +59,7 @@ class Runner(
         self.state, self.integration, self.spawn = threading.RLock(), threading.Lock(), threading.Lock()
         self.children, self.threads, self.events = set(), {}, queue.Queue()
         self.stopping, self.fatal, self.finished = threading.Event(), None, False
+        self.epic_unblocked, self.no_wait = False, bool(os.getenv("TICKET_RUNNER_NO_WAIT"))
         self.sync_setup()
         self.costs()  # migrate legacy costs before any replaceable stage records are reset
         home = Path(__file__).resolve().parents[1]
@@ -104,6 +106,15 @@ class Runner(
     def record(self, n):
         with self.state:
             return self.data.setdefault(str(n), {})
+
+    def continuing(self, n):
+        """Whether this ticket picks up where it stopped: --resume, or a person unblocking it."""
+        return self.a.resume or bool(self.data.get(str(n), {}).get("unblocked"))
+
+    @property
+    def resuming(self):
+        """The same for the epic stages."""
+        return self.a.resume or self.epic_unblocked
 
     def complete(self, n):
         return self.tickets[n]["state"] == "CLOSED" or self.data.get(str(n), {}).get("status") == "done"
@@ -183,6 +194,7 @@ class Runner(
         try:
             self.persist()
             attempt(self.root, "worktree", "prune")
+            self.adopt_hold()
             self.selected = [] if self.a.epic_only else ([self.a.only] if self.a.only else self.order)
             rv = self.data.get("_review", {})
             remaining = [n for n in self.order if not self.complete(n)]
@@ -200,11 +212,51 @@ class Runner(
             raise
 
     def ended_stages(self):
-        with self.state:
-            self.data.pop("_hold", None)
-        outcome = self.stages()
+        outcome = self.settled_stages()
         self.finished = outcome == 0
         return outcome
+
+    def settled_stages(self):
+        """The epic stages, again each time a person unblocks the epic; 0 once they all pass."""
+        while True:
+            if not self.wait_for_epic():
+                return 1
+            outcome = self.stages()
+            if outcome == 0 or self.no_wait or "_hold" not in self.data:
+                return outcome
+
+    def wait_for_epic(self):
+        """Hold the stages while the epic issue says needs-human; False only when told not to wait."""
+        if self.no_wait and "_hold" in self.data:
+            self.sync_tick(watch=True)
+        while "_hold" in self.data:
+            if self.data["_hold"].get("unblocked"):
+                self.release_epic()
+                say(f"Epic #{self.a.parent} unblocked; running its stages again", GREEN, BOLD)
+                return True
+            if self.no_wait:
+                say(f"Epic #{self.a.parent} needs-human: {self.data['_hold']['reason']}", YELLOW, BOLD)
+                return False
+            self.remind()
+            time.sleep(.5)  # Bounded so Ctrl-C lands at once.
+        return True
+
+    def adopt_hold(self):
+        """An epic stuck before holds were saved, and --epic-only --force, which goes ahead whatever its label says."""
+        with self.state:
+            stuck = next((rec for rec in map(self.data.get, ("_review", "_verify", "_ship"))
+                          if rec and rec.get("status") == "needs-human"), None)
+            if stuck and "_hold" not in self.data:
+                self.data["_hold"] = {"reason": stuck.get("reason", "it needs a person")}
+        if getattr(self.a, "force", False) and "_hold" in self.data:
+            self.release_epic()
+
+    def release_epic(self):
+        with self.state:
+            self.data.pop("_hold", None)
+            self.persist()
+        self.epic_unblocked = True
+        self.__dict__.pop("_parent", None)  # The person may have changed the requirements while it waited.
 
     def retire_tree(self):
         """A finished run frees the epic branch for the operator; its commits stay on the branch."""
@@ -220,7 +272,9 @@ class Runner(
     def stages(self):
         """Epic review, verify, then ship, each skipped while its result still holds for the epic head."""
         if dirty(self.tree):
-            raise RuntimeError(f"The epic stages require a clean {os.path.relpath(self.tree)}")
+            self.hold_epic(f"{os.path.relpath(self.tree)} has uncommitted changes; commit or discard them")
+            say(f"Epic #{self.a.parent} needs-human: {self.data['_hold']['reason']}", YELLOW, BOLD)
+            return 1
         if not self.a.no_epic_review:
             outcome = self.epic_review()
             if outcome:

@@ -307,16 +307,18 @@ if mode == 'edit-config': Path(os.environ['ROOT'], '.scratch/epics/207/.agents/t
 if mode == 'commit-config':
     Path('.agents/ticket-runner.json').write_text('{"gate": ["false"]}')
     subprocess.run(['git', 'add', '.agents/ticket-runner.json'], check=True)
-Path('work.txt').write_text('partial' if cap else str(len(Path(os.environ['AGENT_LOG']).read_text())))
+work = 'work-%s.txt' % Path.cwd().name if mode == 'human-until-answered' else 'work.txt'
+Path(work).write_text('partial' if cap else str(len(Path(os.environ['AGENT_LOG']).read_text())))
 if not cap or mode == 'cap-commit':
-    subprocess.run(['git', 'add', 'work.txt'], check=True)
+    subprocess.run(['git', 'add', work], check=True)
     subprocess.run(['git', 'commit', '-qm', 'Implement ticket'], check=True)
 if mode == 'empty': sys.exit(0)
 if mode == 'error':
     print(json.dumps({'type':'result', 'subtype':'error', 'finalText':'STATUS=COMPLETE'}))
     sys.exit(6)
+asking = mode == 'human-until-answered' and Path.cwd().name == '209' and not Path(os.environ['ROOT'], 'answered').exists()
 text = 'Finished the work' if mode in ('missing', 'missing-once') else 'STATUS=NEEDS_HUMAN' \
-    if mode in ('human', 'escalate-human', 'escalate-cap') else 'STATUS=COMPLETE'
+    if mode in ('human', 'escalate-human', 'escalate-cap') or asking else 'STATUS=COMPLETE'
 print(json.dumps({'type':'event', 'event':{'type':'tool_running'}}))
 print(json.dumps({'type':'result', 'subtype':'max_turns' if cap else 'success', 'sessionId':'ticket-session',
                   'finalText':text}))
@@ -331,7 +333,7 @@ sys.exit(8 if cap else 0)
         (self.root / "references").mkdir()
         (self.root / "references" / "definition-of-done.md").write_text("Done means done.\n")
         (self.root / ".gitignore").write_text("fake-bin/\n*.log\nskill.md\nskills/\nreferences/\nprs.json\n"
-                                            "issues.json\nlabels.json\ngh-down\ngh-denied\n")
+                                            "issues.json\nlabels.json\ngh-down\ngh-denied\nanswered\n")
         (self.root / "AGENTS.md").write_text("# Agents\n")
         self.git("add", ".gitignore", "AGENTS.md")
         self.git("commit", "-qm", "Test setup")
@@ -345,7 +347,7 @@ sys.exit(8 if cap else 0)
                         AGENT_SKILLS_DIR=str(self.skills), PARENT_BODY="## Checkpoint: after #210\n- [ ] Tests pass",
                         CALL_LOG=str(self.root / "gh.log"), AGENT_LOG=str(self.root / "agents.log"),
                         ROOT=str(self.root), PR_STATE=str(self.root / "prs.json"),
-                        ISSUE_STATE=str(self.root / "issues.json"))
+                        ISSUE_STATE=str(self.root / "issues.json"), TICKET_RUNNER_NO_WAIT="1")
         for name in ('IMPL_MODEL', 'IMPL_EFFORT', 'IMPL_MAX_TURNS', 'EPIC_REVIEW_MODEL', 'EPIC_REVIEW_EFFORT', 'EPIC_REVIEW_MAX_TURNS',
                      'WORKFLOW', 'TICKET_REVIEW_MODEL', 'TICKET_REVIEW_EFFORT', 'TICKET_REVIEW_MAX_TURNS',
                      'VERIFY_MODEL', 'VERIFY_EFFORT', 'VERIFY_MAX_TURNS', 'GATE_CMDS', 'INSTALL_CMD',
@@ -408,6 +410,12 @@ sys.exit(8 if cap else 0)
 
     def labels(self, n):
         return self.board()['issues'].get(str(n), [])
+
+    def unlabel(self, n):
+        """A person removes needs-human on GitHub."""
+        board = self.board()
+        board['issues'][str(n)].remove('needs-human')
+        (self.root / 'labels.json').write_text(json.dumps(board))
 
     def gh_calls(self):
         return [json.loads(line) for line in (self.root / "gh.log").read_text().splitlines()]
@@ -973,6 +981,271 @@ sys.exit(8 if cap else 0)
         self.assertEqual(result.stderr.count('could not label #209'), 1)
         self.assertEqual(self.state()['209']['status'], 'done')
 
+    # ── waiting on a person ──────────────────────────────────────────────
+
+    def waiting_run(self, *args, mode='human-until-answered', **env):
+        """A run that really waits, reading labels often so the test is quick."""
+        self.env.pop('TICKET_RUNNER_NO_WAIT', None)
+        self.env.update(TICKET_RUNNER_POLL_SECONDS='0.05', TICKET_RUNNER_FLUSH_SECONDS='2')
+        self.free_main_folder()
+        runner = subprocess.Popen(self.argv(*args), cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  env=dict(self.env, ISSUES=json.dumps(self.issues), MODE=mode, **env))
+        self.addCleanup(lambda: runner.kill() if runner.poll() is None else None)
+        return runner
+
+    def until(self, condition, what, runner=None):
+        import time
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                if condition():
+                    return
+            except (OSError, KeyError, ValueError, IndexError):
+                pass  # state.json or the board between writes
+            self.assertTrue(runner is None or runner.poll() is None, f'the run ended while waiting for {what}')
+            time.sleep(.02)
+        self.fail(f'timed out waiting for {what}')
+
+    def until_waiting(self, runner, n=209):
+        self.until(lambda: self.labels(n) == ['needs-human'], f'#{n} to show needs-human', runner)
+
+    @staticmethod
+    def pause():
+        __import__('time').sleep(.4)
+
+    def test_removing_the_label_continues_a_waiting_ticket_without_a_rerun(self):
+        runner = self.waiting_run('--no-epic-review')
+        self.until_waiting(runner)
+        self.pause()
+        self.assertIsNone(runner.poll())
+        self.assertEqual(len(self.calls()), 1)  # Its dependent stays held, and nothing is asked again.
+        (self.root / 'answered').write_text('')
+        self.unlabel(209)
+        out, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 0, errors)
+        self.assertIn('#209 unblocked; continuing it', out)
+        self.assertIn('Waiting on you', out)
+        self.assertIn('Remove needs-human from #209 to continue', out)
+        resumed = self.calls()[1]
+        self.assertEqual(resumed[resumed.index('--resume')+1], 'ticket-session')
+        self.assertIn('You stopped earlier to ask a human', self.prompt(resumed))
+        state = self.state()
+        self.assertEqual((state['209']['status'], state['210']['status']), ('done', 'done'))
+        self.assertNotIn('unblocked', state['209'])
+        self.assertEqual(self.labels(209), ['agent-done'])
+
+    def test_a_ticket_that_gets_stuck_again_waits_again(self):
+        runner = self.waiting_run('--no-epic-review')
+        self.until_waiting(runner)
+        self.unlabel(209)  # Still no answer: the agent asks again, and the label has to go back on.
+        self.until(lambda: len(self.calls()) == 2 and self.labels(209) == ['needs-human'], 'the second wait', runner)
+        self.pause()
+        self.assertEqual(len(self.calls()), 2)
+        (self.root / 'answered').write_text('')
+        self.unlabel(209)
+        _, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 0, errors)
+
+    def test_other_tickets_keep_running_while_one_waits(self):
+        self.issues[1]['body'] = 'Parent #207'
+        runner = self.waiting_run('--no-epic-review')
+        self.until(lambda: self.state()['210']['status'] == 'done', '#210 to finish', runner)
+        self.assertEqual(self.state()['209']['status'], 'awaiting-human')
+        self.until_waiting(runner)
+        (self.root / 'answered').write_text('')
+        self.unlabel(209)
+        _, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 0, errors)
+
+    def test_only_runs_wait_too_and_leave_the_other_tickets_alone(self):
+        runner = self.waiting_run('--only', '209')
+        self.until_waiting(runner)
+        (self.root / 'answered').write_text('')
+        self.unlabel(209)
+        _, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 0, errors)
+        self.assertNotIn('210', self.state())
+
+    def test_the_reminder_repeats_while_nothing_changes(self):
+        runner = self.waiting_run('--no-epic-review', TICKET_RUNNER_REMIND_SECONDS='0.05')
+        self.until_waiting(runner)
+        __import__('time').sleep(1.5)  # The scheduler looks about twice a second.
+        (self.root / 'answered').write_text('')
+        self.unlabel(209)
+        out, _ = runner.communicate(timeout=30)
+        self.assertGreater(out.count('Waiting on you'), 1)
+
+    def test_an_unreadable_issue_never_counts_as_unblocked(self):
+        runner = self.waiting_run('--no-epic-review')
+        self.until_waiting(runner)
+        (self.root / 'gh-down').write_text('')
+        (self.root / 'answered').write_text('')
+        self.unlabel(209)
+        self.pause()
+        self.assertEqual(len(self.calls()), 1)
+        (self.root / 'gh-down').unlink()
+        _, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 0, errors)
+        self.assertEqual(len(self.calls()), 3)
+
+    def test_a_label_github_never_confirmed_does_not_count_as_removed(self):
+        (self.root / 'gh-down').write_text('')
+        runner = self.waiting_run('--no-epic-review')
+        self.until(lambda: self.state()['209']['status'] == 'awaiting-human', '#209 to stop', runner)
+        self.pause()
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(self.labels(209), [])
+        (self.root / 'gh-down').unlink()
+        self.until_waiting(runner)
+        self.pause()
+        self.assertEqual(len(self.calls()), 1)
+        (self.root / 'answered').write_text('')
+        self.unlabel(209)
+        out, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 0, errors)
+        self.assertIn('has not confirmed the needs-human label on #209', out)
+
+    def test_a_label_added_by_hand_counts_once_github_shows_it(self):
+        (self.root / 'gh-denied').write_text('')
+        runner = self.waiting_run('--no-epic-review')
+        self.until(lambda: self.state()['209']['status'] == 'awaiting-human', '#209 to stop', runner)
+        self.pause()
+        board = self.board()
+        board['issues']['209'] = ['needs-human']
+        (self.root / 'labels.json').write_text(json.dumps(board))
+        self.until(lambda: self.state()['_github']['labels']['209'] == 'needs-human', 'the label to be seen', runner)
+        (self.root / 'gh-denied').unlink()
+        (self.root / 'answered').write_text('')
+        self.unlabel(209)
+        _, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 0, errors)
+
+    def test_closing_a_waiting_ticket_by_hand_ends_the_wait(self):
+        runner = self.waiting_run('--no-epic-review')
+        self.until_waiting(runner)
+        (self.root / 'issues.json').write_text(json.dumps({'created': [], 'closed': [209]}))
+        out, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 0, errors)
+        self.assertIn('#209 was closed on GitHub', out)
+        self.assertEqual(self.state()['210']['status'], 'done')
+
+    def test_a_run_with_nothing_an_unblock_could_change_exits(self):
+        runner = self.waiting_run(mode='cap')
+        _, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 1, errors)
+        self.assertEqual(self.state()['209']['status'], 'turn-cap')
+        self.assertEqual(self.labels(209), ['ready-for-agent'])
+
+    def test_ctrl_c_while_waiting_exits_and_resume_waits_again_until_the_label_goes(self):
+        import signal
+        runner = self.waiting_run('--no-epic-review')
+        self.until_waiting(runner)
+        runner.send_signal(signal.SIGINT)
+        runner.communicate(timeout=10)
+        self.assertEqual(runner.returncode, 130)
+        self.assertEqual(self.state()['209']['status'], 'awaiting-human')
+        self.assertTrue((self.root / '.scratch/epics/207').is_dir())
+        runner = self.waiting_run('--resume', '--no-epic-review')
+        self.pause()
+        self.assertIsNone(runner.poll())
+        self.assertEqual(len(self.calls()), 1)
+        (self.root / 'answered').write_text('')
+        self.unlabel(209)
+        _, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 0, errors)
+
+    def test_resume_follows_the_label_and_resume_only_forces_a_ticket(self):
+        self.assertEqual(self.run_script(mode='human-until-answered').returncode, 1)
+        self.assertEqual(self.labels(209), ['needs-human'])
+        result = self.run_script('--resume', mode='human-until-answered')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertIn('--resume --only 209 continues it now', result.stdout)
+        (self.root / 'answered').write_text('')
+        result = self.run_script('--resume', '--only', '209', mode='human-until-answered')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()['209']['status'], 'done')
+        self.assertEqual(self.labels(209), ['agent-done'])
+
+    def test_a_label_removed_while_nothing_was_running_still_unblocks(self):
+        self.assertEqual(self.run_script(mode='human-until-answered').returncode, 1)
+        (self.root / 'answered').write_text('')
+        self.unlabel(209)
+        result = self.run_script('--resume', '--no-epic-review', mode='human-until-answered')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()['210']['status'], 'done')
+
+    def test_a_ticket_stuck_before_the_upgrade_gets_its_label_and_then_waits(self):
+        self.assertEqual(self.run_script(mode='human').returncode, 1)
+        state = self.state()
+        del state['_github']  # As a run from before the sync left it, with the label already cleared by hand.
+        (self.root / '.scratch/run-tickets-commandcode/207/state.json').write_text(json.dumps(state))
+        self.unlabel(209)
+        result = self.run_script('--resume', mode='human')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(self.calls()), 1)  # It can never restart by mistake.
+        self.assertEqual(self.labels(209), ['needs-human'])
+
+    def test_removing_the_label_from_the_epic_reruns_its_stages(self):
+        self.configure(verify=['test -f fixed.txt'])
+        runner = self.waiting_run(mode='repair-noop')
+        self.until_waiting(runner, 207)
+        self.pause()
+        self.assertIsNone(runner.poll())
+        wt = self.root / '.scratch/worktrees/verify-207'
+        (wt / 'fixed.txt').write_text('by hand')
+        subprocess.run(['git', 'add', 'fixed.txt'], cwd=wt, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'Fix by hand'], cwd=wt, check=True)
+        self.unlabel(207)
+        out, errors = runner.communicate(timeout=60)
+        self.assertEqual(runner.returncode, 0, errors)
+        self.assertIn('Epic #207 unblocked', out)
+        self.assertEqual(self.state()['_ship']['status'], 'pr-open')
+        self.assertNotIn('_hold', self.state())
+        self.assertEqual(self.labels(207), [])  # Nothing puts it back.
+        self.assertFalse((self.root / '.scratch/epics/207').exists())
+
+    def test_uncommitted_changes_in_the_epic_worktree_keep_an_unblocked_epic_waiting(self):
+        self.configure(verify=['test -f fixed.txt'])
+        runner = self.waiting_run(mode='repair-noop')
+        self.until_waiting(runner, 207)
+        stray = self.root / '.scratch/epics/207/stray.txt'
+        stray.write_text('uncommitted')
+        self.unlabel(207)
+        self.until(lambda: 'uncommitted changes' in self.state()['_hold']['reason'] and self.labels(207) == ['needs-human'],
+                   'the epic to wait again', runner)
+        self.assertEqual(stray.read_text(), 'uncommitted')
+        runner.kill()
+        runner.communicate()
+
+    def test_epic_only_follows_the_epics_label_and_force_goes_ahead(self):
+        self.configure(verify=['test -f fixed.txt'])
+        self.assertEqual(self.run_script(mode='repair-noop').returncode, 1)
+        before = len(self.calls())
+        result = self.run_script('--epic-only', mode='repair-noop')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(self.calls()), before)
+        self.assertEqual(self.run_script('--force').returncode, 2)
+        wt = self.root / '.scratch/worktrees/verify-207'
+        (wt / 'fixed.txt').write_text('by hand')
+        subprocess.run(['git', 'add', 'fixed.txt'], cwd=wt, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'Fix by hand'], cwd=wt, check=True)
+        result = self.run_script('--epic-only', '--force')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.labels(207), [])  # The runner clears the label it was told to ignore.
+
+    def test_an_epic_stuck_before_the_upgrade_waits_for_its_label(self):
+        self.configure(verify=['test -f fixed.txt'])
+        self.assertEqual(self.run_script(mode='repair-noop').returncode, 1)
+        state = self.state()
+        del state['_hold'], state['_github']
+        (self.root / '.scratch/run-tickets-commandcode/207/state.json').write_text(json.dumps(state))
+        before = len(self.calls())
+        self.assertEqual(self.run_script('--epic-only', mode='repair-noop').returncode, 1)
+        self.assertEqual(len(self.calls()), before)
+        self.assertEqual(self.labels(207), ['needs-human'])
+        self.assertIn('_hold', self.state())
+
     # ── osmani workflow ──────────────────────────────────────────────────
 
     def test_osmani_reviews_each_ticket_on_alternating_models_then_posts_deferred_once(self):
@@ -1039,6 +1312,7 @@ sys.exit(8 if cap else 0)
     def test_osmani_resume_after_a_person_fixes_the_review_re_reviews_their_commits(self):
         self.plan_osmani()
         self.assertEqual(self.run_osmani(mode='review-fail-always').returncode, 1)
+        self.unlabel(209)
         result = self.run_osmani('--resume')
         self.assertEqual(result.returncode, 0, result.stderr)
         again = self.prompt(self.calls()[4])
@@ -1315,7 +1589,7 @@ sys.exit(8 if cap else 0)
         self.env.pop('GATE_CMDS')
         self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
         self.assertEqual(self.state()['_verify']['unexpectedUntracked'], ['stray-source.py'])
-        self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
+        self.assertNotEqual(self.run_script('--epic-only', '--force', '--no-ship').returncode, 0)
         self.assertTrue((self.root / '.scratch/worktrees/verify-207/stray-source.py').exists())
         self.assertIn('unexpected uncommitted files remain', self.state()['_verify']['reason'])
 
@@ -1327,12 +1601,12 @@ sys.exit(8 if cap else 0)
         self.env['GATE_CMDS'] = 'true'
         self.assertEqual(self.run_script('--no-verify', '--no-epic-review').returncode, 0)
         self.env.pop('GATE_CMDS')
-        self.assertNotEqual(self.run_script('--epic-only', '--no-ship', mode='verifier-missing').returncode, 0)
+        self.assertNotEqual(self.run_script('--epic-only', '--force', '--no-ship', mode='verifier-missing').returncode, 0)
         wt = self.root / '.scratch/worktrees/verify-207'
         with (wt / 'README.md').open('a') as out: out.write('human fix\n')
         subprocess.run(['git', 'add', 'README.md'], cwd=wt, check=True)
         subprocess.run(['git', 'commit', '-qm', 'Human fix'], cwd=wt, check=True)
-        result = self.run_script('--epic-only', '--no-ship')
+        result = self.run_script('--epic-only', '--force', '--no-ship')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('gate fails', self.state()['_verify']['reason'])
         self.assertEqual((self.root / 'README.md').read_text(), 'Project\n')
@@ -1345,7 +1619,7 @@ sys.exit(8 if cap else 0)
         self.assertNotEqual(self.run_script('--no-ship').returncode, 0)
         link = self.root / '.scratch/worktrees/verify-207/.env'
         link.unlink(); link.write_text('tampered')
-        self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
+        self.assertNotEqual(self.run_script('--epic-only', '--force', '--no-ship').returncode, 0)
         self.assertEqual(link.read_text(), 'tampered')
         self.assertIn('no longer links', self.state()['_verify']['reason'])
 
@@ -1408,7 +1682,7 @@ sys.exit(8 if cap else 0)
         self.assertTrue(marker.exists())
         child = int(marker.read_text())
         runner.send_signal(signal.SIGINT)
-        runner.communicate(timeout=10)
+        runner.communicate(timeout=30)
         self.assertEqual(runner.returncode, 130)
         with self.assertRaises(ProcessLookupError): os.kill(child, 0)
 
@@ -1418,7 +1692,7 @@ sys.exit(8 if cap else 0)
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((self.root / '.scratch/worktrees/verify-207/new-uncommitted.txt').exists())
         self.assertEqual(self.state()['_verify']['status'], 'needs-human')
-        self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
+        self.assertNotEqual(self.run_script('--epic-only', '--force', '--no-ship').returncode, 0)
         self.assertTrue((self.root / '.scratch/worktrees/verify-207/new-uncommitted.txt').exists())
 
     def test_verify_commands_cannot_mutate_tracked_code(self):
@@ -1436,7 +1710,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.run_script('--no-verify', '--no-epic-review').returncode, 0)
         self.env.pop('GATE_CMDS')
         self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
-        self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
+        self.assertNotEqual(self.run_script('--epic-only', '--force', '--no-ship').returncode, 0)
         self.assertEqual(self.state()['_verify']['status'], 'needs-human')
         self.assertGreaterEqual(len(list(self.verify_dir().glob('gate-*.log'))), 2)
         self.assertFalse((self.root / 'fixed.txt').exists())
@@ -1455,7 +1729,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.state()['_verify']['unexpectedUntracked'], ['new-runtime-output.txt'])
         artifact = self.root / '.scratch/worktrees/verify-207/new-runtime-output.txt'
         self.assertEqual(artifact.read_text(), 'created during checks')
-        self.assertNotEqual(self.run_script('--epic-only', '--no-ship').returncode, 0)
+        self.assertNotEqual(self.run_script('--epic-only', '--force', '--no-ship').returncode, 0)
         self.assertTrue(artifact.exists())
         self.assertNotIn('_ship', self.state())
 
@@ -1489,10 +1763,10 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.run_script().returncode, 0)
         prs = self.prs(); prs[0]['state'] = 'CLOSED'
         (self.root / 'prs.json').write_text(json.dumps(prs))
-        result = self.run_script('--epic-only')
+        result = self.run_script('--epic-only', '--force')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('closed', self.state()['_ship']['reason'].lower())
-        self.assertNotEqual(self.run_script('--epic-only').returncode, 0)
+        self.assertNotEqual(self.run_script('--epic-only', '--force').returncode, 0)
         self.assertEqual(len(self.prs()), 1)
 
     def test_gate_runs_for_every_ticket_without_a_rebase(self):
@@ -1579,6 +1853,7 @@ sys.exit(8 if cap else 0)
         (wt / 'fixed.txt').write_text('by hand')
         subprocess.run(['git', 'add', 'fixed.txt'], cwd=wt, check=True)
         subprocess.run(['git', 'commit', '-qm', 'Fix by hand'], cwd=wt, check=True)
+        self.unlabel(207)
         result = self.run_script('--epic-only')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'repair',
@@ -1753,7 +2028,7 @@ sys.exit(8 if cap else 0)
         self.assertIn('never force-pushes', self.state()['_ship']['reason'])
         self.assertEqual(self.remote_head(), foreign)
         self.assertFalse((self.root / 'prs.json').exists())
-        self.assertEqual(self.run_script('--epic-only').returncode, 1)
+        self.assertEqual(self.run_script('--epic-only', '--force').returncode, 1)
         self.assertEqual(self.kinds().count('launch plan'), 1)  # The plan for this head is kept.
 
     def test_merge_refusals(self):
@@ -1842,6 +2117,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.run_script(mode='fix').returncode, 1)
         self.assertEqual(self.state()['_review']['phase'], 'fix')
         self.env['GATE_CMDS'] = 'true'
+        self.unlabel(400)
         result = self.run_script('--resume', '--epic-only', mode='fix')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.state()['400']['status'], 'done')
@@ -1962,7 +2238,7 @@ sys.exit(8 if cap else 0)
         self.assertFalse([c for c in self.gh_calls() if c[:2] == ['issue', 'close']])
         self.assertNotIn('launch plan', self.kinds())
         before = len(self.calls())
-        self.assertEqual(self.run_script('--epic-only', mode='fix-not-fixed').returncode, 1)
+        self.assertEqual(self.run_script('--epic-only', '--force', mode='fix-not-fixed').returncode, 1)
         self.assertEqual(len(self.calls()), before)  # Same head: still blocked, no agent asked again.
 
     def human_fix(self, name):
@@ -1976,7 +2252,7 @@ sys.exit(8 if cap else 0)
         fix_head = self.state()['_review']['fixHead']
         first = self.human_fix('human-1.txt')
         self.env['REPAIR'] = 'regression'
-        self.assertEqual(self.run_script('--epic-only', mode='fix-not-fixed').returncode, 1)
+        self.assertEqual(self.run_script('--epic-only', '--force', mode='fix-not-fixed').returncode, 1)
         review = self.state()['_review']
         self.assertEqual((review['phase'], review['repairHead']), ('blocked', first))
         self.assertIn('still blocks on G2', review['reason'])
@@ -1985,12 +2261,12 @@ sys.exit(8 if cap else 0)
         self.assertIn('IDs: D2, G1', self.prompt(repair))
         self.assertEqual(repair[repair.index('--resume')+1], 'epic-G')  # The last reviewer's own session.
         before = len(self.calls())
-        self.assertEqual(self.run_script('--epic-only', mode='fix-not-fixed').returncode, 1)
+        self.assertEqual(self.run_script('--epic-only', '--force', mode='fix-not-fixed').returncode, 1)
         self.assertEqual(len(self.calls()), before)  # Same head: still blocked, no agent asked again.
 
         second = self.human_fix('human-2.txt')
         self.env['REPAIR'] = 'fixed'
-        result = self.run_script('--epic-only', mode='fix-not-fixed')
+        result = self.run_script('--epic-only', '--force', mode='fix-not-fixed')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('IDs: G2', self.prompt(self.call('epic repair')))
         self.assertEqual(self.kinds().count('epic review'), 2)  # Never a fresh review of the whole epic.
@@ -2006,7 +2282,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual(self.run_script(mode='fix-not-fixed').returncode, 1)
         self.human_fix('human-1.txt')
         self.env['REPAIR'] = 'not-fixed'
-        self.assertEqual(self.run_script('--epic-only', mode='fix-not-fixed').returncode, 1)
+        self.assertEqual(self.run_script('--epic-only', '--force', mode='fix-not-fixed').returncode, 1)
         review = self.state()['_review']
         self.assertEqual(review['status'], 'needs-human')
         self.assertIn('still blocks on D2, G1', review['reason'])
@@ -2118,7 +2394,7 @@ sys.exit(8 if cap else 0)
         state['_verify']['repairReview'].update(status='pass', protocol=2)
         path = self.root / '.scratch/run-tickets-commandcode/207/state.json'
         path.write_text(json.dumps(state))
-        result = self.run_script('--epic-only', mode='repair-review-fail')
+        result = self.run_script('--epic-only', '--force', mode='repair-review-fail')
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.kinds().count('repair review'), 2)
         self.assertFalse((self.root / 'fixed.txt').exists())
@@ -2133,7 +2409,7 @@ sys.exit(8 if cap else 0)
         path = self.root / '.scratch/run-tickets-commandcode/207/state.json'
         path.write_text(json.dumps(state))
         self.env['PARENT_BODY'] += '\n- [ ] New requirement for the repair'
-        result = self.run_script('--epic-only', mode='repair-review-fail')
+        result = self.run_script('--epic-only', '--force', mode='repair-review-fail')
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.kinds().count('epic review'), 4)
         self.assertEqual(self.kinds().count('repair review'), 2)

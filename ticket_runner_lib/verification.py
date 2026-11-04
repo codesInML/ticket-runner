@@ -122,7 +122,7 @@ class Verification:
                            f"{', '.join(sorted(unexpected))}; commit or remove them, then --epic-only")
             return None
         self.update(rec, drop=("unexpectedUntracked",))
-        resuming = self.a.resume and rec.get("phase") == "repair" and \
+        resuming = self.resuming and rec.get("phase") == "repair" and \
             rec.get("repair", {}).get("status") in RETRYABLE
         problem = (f"{os.path.relpath(wt)} is mid-rebase" if rebasing(wt) else
                    f"{os.path.relpath(wt)} has uncommitted changes" if edited(wt) and not resuming else
@@ -196,7 +196,7 @@ class Verification:
                 time.sleep(min(1, max(0, deadline - time.monotonic())))
             say("verify: the app is ready; running the verifier", BOLD)
             check, head = rec.setdefault("check", {}), git(wt, "rev-parse", "HEAD")
-            session = check.get("sessionId") if self.a.resume and check.get("status") in RETRYABLE \
+            session = check.get("sessionId") if self.resuming and check.get("status") in RETRYABLE \
                 and check.get("head") == head else None
             self.update(rec, phase="check")
             self.update(check, drop=() if session else ("sessionId",))
@@ -275,7 +275,7 @@ class Verification:
     def verify_repair(self, rec, wt, vdir):
         """One repair agent on the implementer model, in the verify worktree."""
         branch, rep = self.verify_branch(), rec.setdefault("repair", {})
-        session = rep.get("sessionId") if self.a.resume and rep.get("status") in RETRYABLE else None
+        session = rep.get("sessionId") if self.resuming and rep.get("status") in RETRYABLE else None
         failing = []
         for r in rec.get("commands", []):
             if r["rc"]:
@@ -333,7 +333,7 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
             self.accept_repair(head, tip)
             return True
         model = a.epic_review_models[-1]
-        session = rr.get("sessionId") if a.resume and rr.get("status") in RETRYABLE and rr.get("head") == head \
+        session = rr.get("sessionId") if self.resuming and rr.get("status") in RETRYABLE and rr.get("head") == head \
             else None
         self.update(rr, base=tip, head=head, status="in-progress", drop=() if session else ("sessionId",))
         say(f"\n━━ Repair review of {tip[:8]}..{head[:8]} with {model} ━━", BOLD, BLUE)
