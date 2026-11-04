@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0004
+---
+
 # The claude-api backend runs on its own config directory, run-wide
 
 A run on `--backend claude-api` puts every stage on Claude Code billed to a company Anthropic API key, never

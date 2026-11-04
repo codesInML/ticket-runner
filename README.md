@@ -7,7 +7,7 @@ Run `bin/ticket-runner --help` for workflow, configuration, and resume options.
 A ticket is stuck when its implementer ends NEEDS_HUMAN, BLOCKED or without a STATUS line, when its fix
 round does, or when its ticket review still blocks after the fix round. Before it goes to a person, the
 runner hands it once per kind (implement, review) to the escalation model (`--escalate-model`, env
-`ESCALATE_MODEL`, default `sol` @ medium on codex and `opus` @ high on claude-api, `off` on commandcode). That
+`ESCALATE_MODEL`, default `sol` @ medium on codex and `opus` @ medium on claude, `off` on commandcode). That
 session runs in a fresh thread in the ticket's worktree with the earlier reports. It is told to fix the
 problem, run the checks itself, and stop only for a decision that belongs to a person. A review escalation
 is followed by one more review round with the same reviewer; a ticket still blocking after that needs a
@@ -22,20 +22,21 @@ itself, manual checks included, on the platform each one names. It also tells th
 under `## VERIFICATION`. Set `appVerification` in `.agents/ticket-runner.json` to a doc saying how to run
 the app (devices, scripts, test data) and every working prompt, and the verifier, points at it. The doc is
 protected like the config, and ticket worktrees see it only if it is committed or listed in `linkFiles`.
-`bin/ticket-runner-osmani` selects the Osmani workflow, and `bin/ticket-runner-claude` the
-claude-api backend. `bin/ticket-runner-codex` selects the codex backend on a ChatGPT subscription.
-The backend wrappers compose with `--workflow osmani`. Every
-command uses the `ticket_runner.py` entry point and requires the adjacent `ticket_runner_lib`
-package.
+`bin/ticket-runner` is the only command. `--backend` and `--workflow` (or `BACKEND` and `WORKFLOW`)
+choose the agent CLI and skill set, are required on an epic's first run, and are saved with the epic,
+so later runs need neither. The command uses the `ticket_runner.py` entry point and requires the
+adjacent `ticket_runner_lib` package.
 
 ## Backends
 
 A backend is the agent CLI and account of every session in a run (`--backend`, env `BACKEND`):
 
-- `commandcode` (default): the `command-code` CLI (`COMMANDCODE_BIN`) and its models.
-- `claude-api`: Claude Code (`CLAUDE_BIN`, default `claude`) on a config directory of the runner's
-  own (`.scratch/claude-config`), billed to the company Anthropic API key and never to a personal
-  subscription. See `docs/adr/0002-*` for why.
+- `commandcode`: the `command-code` CLI (`COMMANDCODE_BIN`) and its models. Ticket reviews alternate
+  over `minimax` (`minimax/minimax-m3.1-flash`) and `glm`, and `minimax` runs the verifier. Luna is
+  refused on this backend, by alias or full ID, from any flag or variable; a ticket's saved Luna
+  review moves to its current reviewer on its next round.
+- `claude`: Claude Code (`CLAUDE_BIN`, default `claude`) on the operator's normal login and
+  subscription. See `docs/adr/0004-*` for why.
 - `codex`: the Codex CLI (`CODEX_BIN`, default `codex`) billed to the operator's ChatGPT subscription.
 
 ### Codex on a ChatGPT subscription
@@ -79,42 +80,40 @@ Resumed thread totals subtract usage already recorded. `AGENTS.md` and `AGENTS.o
 depth, `.codex/` and `.agents/` join the protected paths: main-worktree changes stop the run, and ticket
 diffs touching them never integrate. Saved-backend rules also apply to codex. See `docs/adr/0003-*`.
 
-### Claude Code on the company API key
+### Claude Code on a subscription
 
-The key comes from `TICKET_RUNNER_ANTHROPIC_API_KEY`, else the macOS Keychain item
-`krim-anthropic-api-key` (`TICKET_RUNNER_KEYCHAIN_SERVICE` names another). Store it once with
-`security add-generic-password -s krim-anthropic-api-key -a "$USER" -w`. Without a key the run,
-and its `--dry-run`, refuse. The key is read once and set only in each Claude Code session's
-environment, with every other Anthropic credential and provider switch removed; the runner's own
-gate, verify and install commands never see it, and it is never logged or saved. The config
-directory holds no login, so a session without the key fails rather than reaching a subscription,
-and a session whose init reports any `apiKeySource` but the key stops the run before its first API
-call. Only the runner-owned user settings load (`--setting-sources user`); project settings cannot
-replace the key, endpoint or provider. Project CLAUDE.md discovery and normal tools remain available.
-The directory links your skills (`AGENT_SKILLS_DIR`) and turns off commit attribution and
-auto-memory.
+Run `claude auth login` first. Preflight, including `--dry-run`, runs `claude auth status` as a session
+would and refuses unless it reports `loggedIn` with `authMethod: "claude.ai"`, the binary exists, and
+every stage names a Claude model (`sonnet`, `opus`, `haiku` or a full `claude-*` ID). No API key is used.
+Each session's environment has every inherited Anthropic credential, token handoff, provider switch and
+`CLAUDE_CONFIG_DIR` removed, and a session whose init reports any `apiKeySource` but `none`, or another
+API provider, stops the run before its first API call.
 
-On claude-api the stages default to `sonnet` (implement, fix and repair sessions, verifier, at
-`medium`), `opus` (one epic reviewer that re-checks its own findings, at `high`; the osmani ticket
-review, at `medium`) and `haiku` (launch plan, at `low`). Every stage model must be a Claude model
-(`sonnet`, `opus`, `haiku` or a full `claude-*` ID), checked before anything is spent. CLAUDE.md and CLAUDE.local.md at every project depth
-and `.claude/` join the protected paths, since Claude Code reads them. The backend is saved with
-the epic: switching it is refused while a ticket is part-way through, and a run that does not name
-a backend refuses to move a saved epic off its own.
+Sessions run on the operator's own `~/.claude`, because the login lives in the macOS Keychain, tied to
+that config directory. They read the global `CLAUDE.md` and skills and appear in the operator's history.
+Only user settings load (`--setting-sources user`), so project settings cannot replace the account or
+endpoint. `--strict-mcp-config` leaves out configured MCP servers, the verifier's browser server is passed
+inline, and inline settings turn off commit attribution and auto-memory. CLAUDE.md and CLAUDE.local.md at
+every project depth and `.claude/` join the protected paths, since Claude Code reads them.
 
-Each Claude Code session's cost, tokens, turns and time are recorded per attempt in `state.json`
-(a resumed session's earlier spend is subtracted, as Claude Code reports session totals). An append-only
-epic cost ledger preserves spending when a review or launch plan is replaced; older state migrates its
-remaining costs once. The
-ticket graph shows the epic's running total and the run ends with a table by stage and ticket;
-`--post-costs` also puts each ticket's cost in its done comment and the table on the epic issue.
-`IMPL_MAX_BUDGET_USD`, `TICKET_REVIEW_MAX_BUDGET_USD`, `EPIC_REVIEW_MAX_BUDGET_USD`,
-`VERIFY_MAX_BUDGET_USD` and `LAUNCH_PLAN_MAX_BUDGET_USD` cap each session of their stage; a session
-that reaches its cap ends `budget-cap`, which `--resume` continues with a fresh budget.
+| Stage | Default model | Effort |
+| --- | --- | --- |
+| Implement, fix, integration repair, verify repair | `sonnet` | medium |
+| Ticket review (osmani) | `sonnet` | high |
+| Epic review, repair review | `opus` | medium |
+| Verify | `sonnet` | medium |
+| Launch plan | `haiku` | low |
+| Escalate (a stuck ticket) | `opus` | medium |
 
-An account failure (credit balance too low, a revoked key, a spend limit) stops every ticket at
-once; top up or fix the key, then `--resume`. Rate limits and overloads end only the session, as
-`provider-error`.
+Costs are tokens and time, with no dollar amount in state, the graph or the tables posted with
+`--post-costs`, and a resumed session's earlier usage is subtracted. A spent usage limit stops every ticket
+and reports the reset time when the session gave one; wait for it, then `--resume`. A signed-out or expired
+login stops the run with `claude auth login`, then `--resume`. Other rate limits and overloads end only
+the session, as `provider-error`.
+
+An epic saved on the removed `claude-api` backend continues only once `--backend` names its new one, since
+its account changes. Its part-way tickets start fresh sessions in their kept worktrees, as the old config
+directory's sessions cannot be resumed.
 
 ## Code layout
 
@@ -144,7 +143,7 @@ modules do not import the workflow classes.
 ## Tests
 
 Run `python3 -m unittest discover -s tests -q`. The integration suite uses
-temporary git repositories and fake GitHub, CommandCode, Claude Code and keychain executables. Runtime
+temporary git repositories and fake GitHub, CommandCode, Claude Code and Codex executables. Runtime
 verification tests also start a temporary server on localhost.
 
 ## Integration and recovery guarantees

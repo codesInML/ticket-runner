@@ -24,8 +24,8 @@ _Avoid_: Repair ticket, follow-up ticket
 The skill set an epic's prompts follow: pocock or osmani.
 
 **Backend**:
-The agent CLI and account every session of a run uses: commandcode, claude-api (Claude Code billed to a
-company Anthropic API key), or codex (the Codex CLI on the operator's ChatGPT subscription).
+The agent CLI and account every session of a run uses: commandcode, claude (Claude Code on the operator's
+subscription), or codex (the Codex CLI on the operator's ChatGPT subscription).
 _Avoid_: Engine, harness, provider
 
 ## Stages
@@ -36,8 +36,8 @@ _Avoid_: Final stages, post-ticket stages
 
 **Ticket review**:
 A read-only review of one ticket's diff by a different model family, before it integrates (osmani only). On
-the claude-api backend it is a different model of the same family; on the codex backend it is, by default,
-the implementer's own model in a fresh session that never saw the implementation.
+the claude and codex backends it is, by default, the implementer's own model in a fresh session that never
+saw the implementation.
 
 **Epic review**:
 The review of the whole epic diff by one or two reviewers, ending in SHIP or in fix tickets.
