@@ -97,7 +97,7 @@ class CodexBackendTests(base.RunnerTests):
         self.env.pop('BACKEND', None)
 
     def run_codex(self, *args, mode='success'):
-        return self.run_script(*args, mode=mode, script='ticket-runner-codex')
+        return self.run_script('--backend', 'codex', *args, mode=mode)
 
     def test_preflight_defaults_and_same_model_warning(self):
         self.plan_osmani()
@@ -234,14 +234,15 @@ class CodexBackendTests(base.RunnerTests):
         self.assertEqual(self.state()['209']['status'], 'provider-error')
         self.assertEqual(self.state()['210']['status'], 'done')
 
-    def test_saved_backend_cannot_be_switched_mid_ticket_or_left_implicitly(self):
+    def test_saved_backend_cannot_be_switched_mid_ticket_and_later_runs_reuse_it(self):
         result = self.run_codex('--max-turns', '1', mode='max-turns')
         self.assertEqual(result.returncode, 1)
         result = self.run_script('--backend', 'commandcode', '--resume')
         self.assertIn('part-way through', result.stderr)
         self.assertEqual(self.run_codex('--resume', '--only', '209', '--no-epic-review').returncode, 0)
-        result = self.run_script('--only', '209')
-        self.assertIn('runs on the codex backend; pass --backend codex', result.stderr)
+        result = self.run_script('--dry-run', '--only', '209')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Backend: codex', result.stdout)
 
     def test_verifier_gets_browser_override_and_default_model(self):
         self.configure(serve='python3 -c ' + __import__('shlex').quote(base.SERVE),

@@ -89,6 +89,21 @@ def positive(value):
     return int(value)
 
 
+def epic_folder(root, parent):
+    return Path(root) / ".scratch" / "run-tickets-commandcode" / str(parent)
+
+
+def saved_settings(parent):
+    """The epic's saved settings, read only to choose its backend's defaults. run_checkout reads them again under
+    the lock and refuses if they moved."""
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+    try:
+        meta = json.loads((epic_folder(top, parent) / "state.json").read_text()).get("_meta")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
 def parse_args():
     p = argparse.ArgumentParser(prog="ticket-runner", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Model aliases (commandcode): flash or deepseek (default), flash-fast, muse, luna, glm, claude.
@@ -117,24 +132,23 @@ with a fresh cap. Usage limits and signed-out logins stop every ticket; request 
 are retryable provider-error. No dollar costs apply on codex.
 
 Examples:
-  ticket-runner 207 --dry-run
+  ticket-runner 207 --backend codex --workflow osmani --dry-run
   ticket-runner 207 --jobs 2 --model muse
   ticket-runner 207 --resume --max-turns 1000
   ticket-runner 207 --only 209
   ticket-runner 207 --epic-only               (epic review, verify, ship)
   ticket-runner 207 --epic-review-model glm   (one reviewer, which re-checks its own findings)
   ticket-runner 207 --epic-only --merge
-  ticket-runner-osmani 207 --dry-run       (same runner, --workflow osmani)
-  ticket-runner-osmani 207 --ticket-review-model glm
-  ticket-runner-claude 207 --dry-run       (same runner, --backend claude-api)
-  ticket-runner-claude 207 --workflow osmani --post-costs
+  ticket-runner 207 --backend claude --workflow pocock --post-costs
+  ticket-runner 207 --backend commandcode --workflow osmani --ticket-review-model glm
 
 Osmani plans: every open sub-ticket needs `## Acceptance criteria` and `## Verification`,
 must not be XL or likely touch more than 8 files, and must list every dependency under
 `## Blocked by` (or a native link). The plan check refuses otherwise, on --dry-run too;
---skip-plan-check overrides. The workflow and the backend are saved with the epic's state;
-switching either is refused while any ticket is part-way through, and a saved backend is only
-left when --backend (or BACKEND) names another.
+--skip-plan-check overrides. --backend and --workflow (or BACKEND and WORKFLOW) are required on an
+epic's first run and saved with its state, so later runs need neither. Switching either is
+refused while any ticket is part-way through. An epic saved on the removed claude-api backend
+continues only with --backend named: its old sessions cannot resume, so they start fresh.
 
 Requirements: a clean main worktree on the epic branch, and AGENTS.md committed
 on it (ticket worktrees only see committed files). Leave the main worktree alone
@@ -189,10 +203,11 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, WORKFLOW, IMPL
 """)
     p.add_argument("parent", type=positive)
     p.add_argument("--workflow", choices=WORKFLOWS, default=os.getenv("WORKFLOW"),
-                   help="skills the prompts follow (default: the epic's saved workflow, else pocock)")
+                   help="skills the prompts follow; required on an epic's first run, then saved with it")
     p.add_argument("--backend", default=os.getenv("BACKEND") or None,
-                   help="agent CLI and account of every session in the run: commandcode (default), or claude-api "
-                   "(Claude Code on the company Anthropic API key), or codex (ChatGPT subscription)")
+                   help="agent CLI and account of every session in the run: commandcode, claude (Claude Code on "
+                   "your subscription) or codex (ChatGPT subscription); required on an epic's first run, then saved "
+                   "with it")
     p.add_argument("--model", default=os.getenv("IMPL_MODEL"),
                    help="implementation model (default flash; sonnet on claude)")
     p.add_argument("--effort", default=os.getenv("IMPL_EFFORT"),
@@ -246,8 +261,19 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, WORKFLOW, IMPL
     if a.merge and (a.only or a.no_verify or a.no_epic_review or a.no_ship):
         p.error("--merge needs the verify stage, the epic review and the ship stage: drop --only, --no-verify, "
                 "--no-epic-review and --no-ship")
-    # Named by the operator, or defaulted: a defaulted backend never moves a saved epic off its own.
-    a.backend_named, a.backend = a.backend is not None, a.backend or "commandcode"
+    # Named by the operator, or saved with the epic; a first run has to name it, as the account costs real usage.
+    a.backend_named = a.backend is not None
+    if not a.backend_named:
+        meta = saved_settings(a.parent)
+        if meta is None:
+            p.error(f"--backend{' and --workflow are' if a.workflow is None else ' is'} required on an epic's first "
+                    f"run (or set BACKEND{' and WORKFLOW' if a.workflow is None else ''}); later runs reuse what it saved")
+        a.backend = meta.get("backend") or "commandcode"  # state from before the backend was saved is commandcode's
+        if a.backend == REMOVED_BACKEND:
+            p.error(f"#{a.parent} ran on the removed {REMOVED_BACKEND} backend, billed to a company API key; pass "
+                    "--backend claude to continue it on your subscription, or another backend")
+    if a.backend == REMOVED_BACKEND:
+        p.error(f"the {REMOVED_BACKEND} backend was removed; use --backend claude, your Claude Code subscription")
     if a.backend not in BACKENDS:  # argparse leaves an environment default unchecked
         p.error(f"--backend must be one of {', '.join(BACKENDS)}")
     # Defaults belong to the backend: a flag or env var always wins over them.
@@ -350,7 +376,7 @@ def main():
         strip_codex_auth()
     root = Path(command("git", "rev-parse", "--show-toplevel"))
     os.chdir(root)
-    folder = root / ".scratch" / "run-tickets-commandcode" / str(a.parent)
+    folder = epic_folder(root, a.parent)
     if a.dry_run:
         return run_checkout(a, root, folder)
     # Acquire before reading state, discovery, or branch validation. An invocation
@@ -376,6 +402,9 @@ def run_checkout(a, root, folder):
     if a.only and a.only not in tickets:
         raise RuntimeError(f"#{a.only} is not a sub-ticket of #{a.parent}")
     saved = data.get("_meta", {}).get("workflow")
+    if not (a.workflow or saved or data.get("_meta")):
+        raise RuntimeError("--workflow is required on an epic's first run (or set WORKFLOW); later runs reuse what "
+                           "it saved")
     a.workflow = a.workflow or saved or "pocock"
     busy = [n for n in order if tickets[n]["state"] != "CLOSED"
             and data.get(str(n), {}).get("status") not in (None, "done")]

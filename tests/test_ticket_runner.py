@@ -317,7 +317,7 @@ sys.exit(8 if cap else 0)
                         CALL_LOG=str(self.root / "gh.log"), AGENT_LOG=str(self.root / "agents.log"),
                         ROOT=str(self.root), PR_STATE=str(self.root / "prs.json"),
                         ISSUE_STATE=str(self.root / "issues.json"))
-        for name in ('IMPL_MODEL', 'IMPL_EFFORT', 'IMPL_MAX_TURNS', 'EPIC_REVIEW_MODEL', 'EPIC_REVIEW_EFFORT', 'EPIC_REVIEW_MAX_TURNS',
+        for name in ('BACKEND', 'IMPL_MODEL', 'IMPL_EFFORT', 'IMPL_MAX_TURNS', 'EPIC_REVIEW_MODEL', 'EPIC_REVIEW_EFFORT', 'EPIC_REVIEW_MAX_TURNS',
                      'WORKFLOW', 'TICKET_REVIEW_MODEL', 'TICKET_REVIEW_EFFORT', 'TICKET_REVIEW_MAX_TURNS',
                      'VERIFY_MODEL', 'VERIFY_EFFORT', 'VERIFY_MAX_TURNS', 'GATE_CMDS', 'INSTALL_CMD',
                      'LAUNCH_PLAN_MODEL', 'LAUNCH_PLAN_EFFORT', 'LAUNCH_PLAN_MAX_TURNS',
@@ -333,13 +333,19 @@ sys.exit(8 if cap else 0)
     def git(self, *args):
         return subprocess.check_output(["git", *args], cwd=self.root, text=True, stderr=subprocess.DEVNULL).strip()
 
-    def run_script(self, *args, mode="success", script="ticket-runner"):
-        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE=mode)
-        return subprocess.run([str(RUNNER / "bin" / script), "207", *args],
+    def first_run_env(self):
+        """An epic's first run has to name its backend and workflow; later runs reuse what it saved."""
+        if (self.root / ".scratch/run-tickets-commandcode/207/state.json").exists():
+            return {}
+        return {"BACKEND": self.env.get("BACKEND", "commandcode"), "WORKFLOW": self.env.get("WORKFLOW", "pocock")}
+
+    def run_script(self, *args, mode="success"):
+        env = dict(self.env, **self.first_run_env(), ISSUES=json.dumps(self.issues), MODE=mode)
+        return subprocess.run([str(RUNNER / "bin/ticket-runner"), "207", *args],
                               cwd=self.root, env=env, capture_output=True, text=True)
 
     def run_osmani(self, *args, mode="success"):
-        return self.run_script(*args, mode=mode, script="ticket-runner-osmani")
+        return self.run_script("--workflow", "osmani", *args, mode=mode)
 
     def plan_osmani(self):
         self.issues[0]["body"] = planned("First slice")
@@ -353,6 +359,10 @@ sys.exit(8 if cap else 0)
             self.git("add", ".agents/ticket-runner.json")
             if self.git("diff", "--cached", "--name-only"):
                 self.git("commit", "-qm", "Configure the runner")
+
+    def calls_made(self):
+        log = self.root / "agents.log"
+        return len(log.read_text().splitlines()) if log.exists() else 0
 
     def gh_calls(self):
         return [json.loads(line) for line in (self.root / "gh.log").read_text().splitlines()]
@@ -495,6 +505,45 @@ sys.exit(8 if cap else 0)
 
     def test_provider_error_cannot_pass_even_with_complete_text(self):
         self.check_failure('error', 'provider-error')
+
+    def test_first_run_must_name_backend_and_workflow_then_reuses_them(self):
+        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success')
+        def bare(*args, **extra):
+            return subprocess.run([str(RUNNER / 'bin/ticket-runner'), '207', *args], cwd=self.root,
+                                  env=dict(env, **extra), capture_output=True, text=True)
+        for args, extra, message in (((), {}, '--backend and --workflow are required'),
+                                     (('--workflow', 'pocock'), {}, '--backend is required'),
+                                     (('--backend', 'commandcode'), {}, '--workflow is required'),
+                                     (('--backend', 'commandcode'), {'WORKFLOW': ''}, '--workflow is required')):
+            result = bare('--dry-run', *args, **extra)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(message, result.stderr)
+        self.assertEqual(self.calls_made(), 0)
+        for args, extra in ((('--backend', 'commandcode', '--workflow', 'pocock'), {}),
+                            ((), {'BACKEND': 'commandcode', 'WORKFLOW': 'pocock'})):
+            self.assertEqual(bare('--dry-run', *args, **extra).returncode, 0)
+        first = bare('--backend', 'commandcode', '--workflow', 'osmani', '--skip-plan-check', '--only', '209')
+        self.assertEqual(first.returncode, 0, first.stderr)
+        meta = self.state()['_meta']
+        self.assertEqual((meta['backend'], meta['workflow']), ('commandcode', 'osmani'))
+        again = bare('--dry-run', '--skip-plan-check')  # no flags: the saved backend and workflow
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn('Backend: commandcode', again.stdout)
+        self.assertIn('ticket review', again.stdout)
+
+    def test_old_state_without_saved_settings_still_runs_without_flags(self):
+        folder = self.root / '.scratch/run-tickets-commandcode/207'
+        folder.mkdir(parents=True)
+        (folder / 'state.json').write_text(json.dumps({'_meta': {'branch': 'main', 'epicBase': self.git('rev-parse', 'HEAD')}}))
+        result = subprocess.run([str(RUNNER / 'bin/ticket-runner'), '207', '--dry-run'], cwd=self.root,
+                                env=dict(self.env, ISSUES=json.dumps(self.issues), MODE='success'),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Backend: commandcode', result.stdout)
+        self.assertIn('Workflow: pocock', result.stdout)
+
+    def test_only_one_command_is_installed(self):
+        self.assertEqual([p.name for p in (RUNNER / 'bin').iterdir()], ['ticket-runner'])
 
     def test_model_aliases_select_supported_effort(self):
         for alias, model, effort in [('flash', 'deepseek/deepseek-v4.1-flash', 'max'),
@@ -965,7 +1014,7 @@ sys.exit(8 if cap else 0)
         self.assertEqual([self.state()[str(n)]['status'] for n in (209, 210)], ['done', 'done'])
 
     def test_checkout_lock_precedes_discovery_and_state_snapshot(self):
-        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success', DISCOVERY_DELAY='1')
+        env = dict(self.env, **self.first_run_env(), ISSUES=json.dumps(self.issues), MODE='success', DISCOVERY_DELAY='1')
         slow = subprocess.Popen([str(RUNNER / 'bin/ticket-runner'), '207', '--no-epic-review'],
                                 cwd=self.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: slow.kill() if slow.poll() is None else None)
@@ -982,7 +1031,7 @@ sys.exit(8 if cap else 0)
 
     def test_interrupt_during_verification_stops_shell_and_descendants(self):
         self.configure(verify=['echo $$ > command.pid; sleep 60'])
-        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success')
+        env = dict(self.env, **self.first_run_env(), ISSUES=json.dumps(self.issues), MODE='success')
         runner = subprocess.Popen([str(RUNNER / 'bin/ticket-runner'), '207', '--no-ship'],
                                   cwd=self.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: runner.kill() if runner.poll() is None else None)

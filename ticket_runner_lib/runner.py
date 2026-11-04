@@ -63,8 +63,7 @@ class Runner(
         # Under .claude/ only tracked files are watched: it may hold untracked worktrees and local settings
         # that the operator's own sessions keep changing while the runner works.
         claude_dir = attempt(root, "ls-files", "-z", "--", ".claude").stdout.split("\0") if self.claude else []
-        protected = [home / "ticket_runner.py", home / "bin/ticket-runner", home / "bin/ticket-runner-osmani",
-                     home / "bin/ticket-runner-claude", home / "bin/ticket-runner-codex",
+        protected = [home / "ticket_runner.py", home / "bin/ticket-runner",
                      *sorted((home / "ticket_runner_lib").glob("*.py")),
                      *(root / f for f in project if not f.endswith("/") and not f.startswith(":(glob)")), *(root / f for f in claude_dir if f)]
         # A protected file that is missing now must stay missing: an agent creating one counts as changing it.
