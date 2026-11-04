@@ -8,7 +8,43 @@ import time
 from .display import say
 from .graph import waves
 from .processes import command
-from .settings import YELLOW
+from .settings import FIX_LABEL, YELLOW
+
+
+# Every label the runner sets, and how it looks when the runner has to create it.
+LABELS = {"needs-human": ("B60205", "Waiting on a person; remove this label to unblock"),
+          "in-progress": ("FBCA04", "An agent is working on this"),
+          "ready-for-agent": ("0E8A16", "Ready for an agent"),
+          "agent-done": ("1D76DB", "An agent finished this"),
+          FIX_LABEL: ("D93F0B", "Filed by the ticket runner's epic review")}
+STATUS_LABELS = ("needs-human", "in-progress", "ready-for-agent", "agent-done")
+GH_TIMEOUT = 30
+# GitHub being out of reach, or asking for patience, as opposed to telling the runner no.
+TRANSIENT = re.compile(r"unable to access|could not resolve host|failed to connect|couldn't connect|error connecting|connection |timed out|"
+                       r"timeout|dial tcp|no such host|network is|\beof\b|\btls\b|http 5\d\d|http 429|rate limit|"
+                       r"bad gateway|service unavailable|gateway time|temporar", re.I)
+
+
+def gh(*args):
+    """One bounded gh command that never raises, for what must not hold up the run."""
+    try:
+        return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=GH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 1, "", f"gh {args[0]} timed out after {GH_TIMEOUT}s")
+    except OSError as exc:
+        return subprocess.CompletedProcess(args, 1, "", str(exc))
+
+
+def transient(stderr):
+    return not stderr.strip() or bool(TRANSIENT.search(stderr))
+
+
+def missing_labels(stderr):
+    """Label names GitHub says the repo lacks: gh's `'name' not found`, and its `labels not found: a, b`."""
+    names = re.findall(r"'([^']+)' not found", stderr)
+    for listed in re.findall(r"labels? not found: *(.+)", stderr, re.I):
+        names += [name.strip(" '\"") for name in listed.split(",")]
+    return names
 
 
 EDGES = "blockedBy(first: 100) { totalCount nodes { number state repository { nameWithOwner } } }"

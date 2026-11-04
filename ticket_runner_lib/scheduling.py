@@ -75,6 +75,7 @@ class Scheduling:
                 continue
             self.threads.pop(n).join()
             pending.remove(n)
+            self.nudge()
             if self.complete(n):
                 done.add(n)
             else:

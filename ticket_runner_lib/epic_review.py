@@ -8,11 +8,11 @@ import shutil
 import subprocess
 import time
 
-from .display import dollars, say
+from .display import say
 from .github import discover, gh_json
 from .graph import waves
 from .processes import attempt, dirty, git
-from .settings import BLUE, BOLD, CLAUDE_MODELS, DIM, FIX_LABEL, GREEN, MODELS, RETRYABLE, REVIEW_PROTOCOL, YELLOW
+from .settings import BLUE, BOLD, CLAUDE_MODELS, DIM, GREEN, MODELS, RETRYABLE, REVIEW_PROTOCOL, YELLOW
 from .text import empty, review_rows, says_none, section, verdict
 
 
@@ -409,6 +409,7 @@ exactly one line for your report as it stands: {line}.
                 continue
             number = next((i["number"] for i in existing if marker in (i.get("body") or "")), None)
             if number is not None:
+                self.link_fix_ticket(number)  # A lost reply may have cost its link too.
                 return number, None
             created = subprocess.run(["gh", "issue", "create", "--title", title, "--body-file", str(path)],
                                      capture_output=True, text=True)
@@ -427,26 +428,6 @@ exactly one line for your report as it stands: {line}.
             f"{body.rstrip()}\n\n## Blocked by\n{blockers}\n"
         return (f"## Parent\n#{self.a.parent}\n\nFiled by the epic review of #{self.a.parent} at `{rv['start'][:8]}` "
                 f"to fix its confirmed findings.\n\n{body.strip()}\n\n{marker}\n")
-
-    def link_fix_ticket(self, n):
-        """Label the fix ticket and make it a native sub-issue; the `## Parent` section already makes it one."""
-        if not getattr(self, "_fix_label", False):
-            subprocess.run(["gh", "label", "create", FIX_LABEL, "--color", "D93F0B", "--force", "--description",
-                            "Filed by the ticket runner's epic review"], capture_output=True, text=True)
-            self._fix_label = True
-        problems = []
-        result = subprocess.run(["gh", "issue", "edit", str(n), "--add-label", FIX_LABEL], capture_output=True, text=True)
-        if result.returncode:
-            problems.append(f"label: {result.stderr.strip()}")
-        found = subprocess.run(["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{n}", "--jq", ".id"],
-                               capture_output=True, text=True)
-        linked = found if found.returncode else subprocess.run(
-            ["gh", "api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{self.a.parent}/sub_issues",
-             "-F", f"sub_issue_id={found.stdout.strip()}"], capture_output=True, text=True)
-        if found.returncode or linked.returncode:
-            problems.append(f"sub-issue link: {(linked.stderr or found.stderr).strip()}")
-        if problems:
-            say(f"Warning: #{n} filed, but {'; '.join(problems)}", YELLOW, err=True)
 
     def refresh_tickets(self, numbers):
         """Discover the epic again, so filed fix tickets join the graph; the numbers discovery did not find."""
@@ -590,24 +571,8 @@ exactly one line for your report as it stands: {line}.
 
     def close_tickets(self, rv):
         """Every sub-ticket closes once the epic review says SHIP; the epic itself stays open."""
-        closed = rv.setdefault("closed", [])
-        for n in self.order:
-            if n in closed or self.tickets[n]["state"] == "CLOSED":
-                continue
-            spent = [c["costUsd"] for owner, c in self.costs() if owner == f"#{n}" and "costUsd" in c]
-            cost = f" Cost: {dollars(sum(spent))} (estimated)." \
-                if spent and getattr(self.a, "post_costs", False) else ""
-            result = subprocess.run(["gh", "issue", "close", str(n), "--comment",
-                                     f"Integrated into `{self.epic}` at `{rv['head'][:8]}`; the epic review of "
-                                     f"#{self.a.parent} said SHIP.{cost}"], capture_output=True, text=True)
-            if result.returncode:
-                say(f"Warning: could not close #{n} ({result.stderr.strip()}); the next run tries again",
-                    YELLOW, err=True)
-                continue
-            with self.state:
-                closed.append(n)
-                self.persist()
-            say(f"Closed #{n}", DIM)
+        self.update(rv, closeAt=rv["head"])
+        self.nudge()
 
     def report_sections(self, rv):
         names = {r["model"]: r["name"] for r in rv["reviewers"]}
@@ -659,10 +624,5 @@ exactly one line for your report as it stands: {line}.
         body.write_text(f"Findings from the epic review of #{self.a.parent} at `{rv['start'][:8]}` that block "
                         "nothing: deferred ones the epic does not own, and disputed ones the reviewers disagree "
                         "on, with both sides' evidence.\n\n" + "\n\n".join(parts) + "\n")
-        result = subprocess.run(["gh", "issue", "comment", str(self.a.parent), "--body-file", str(body)],
-                                capture_output=True, text=True)
-        if result.returncode:
-            return say(f"Warning: could not post the epic review's findings on #{self.a.parent} "
-                       f"({result.stderr.strip()}); they are in {body}", YELLOW, err=True)
-        self.update(rv, posted=rv["start"])
-        say(f"Posted the epic review's deferred and disputed findings on #{self.a.parent}", DIM)
+        self.update(rv, findingsAt=rv["start"])
+        self.nudge()

@@ -44,8 +44,7 @@ class TicketImplementation:
 
     def fail(self, n, record, status, reason):
         self.update(record, status=status, reason=reason)
-        self.label(n, "needs-human" if status in {"needs-human", "awaiting-human"} else "ready-for-agent",
-                   "in-progress")
+        self.nudge()
         say(f"#{n} {status}: {reason}", YELLOW, BOLD)
 
     def implement(self, n, record, tdir):
@@ -77,7 +76,7 @@ class TicketImplementation:
                              "session; commit or discard there, then --resume")
         self.update(record, status="in-progress", phase="implement", base=base, branch=branch,
                     worktree=str(wt), drop=() if session else ("sessionId", "reason"))
-        self.label(n, "in-progress", "ready-for-agent")
+        self.nudge()
         color = self.color(n)
         say(f"\n━━ #{n}: {'resuming' if session else 'implementing'} with {self.a.model} "
             f"in {os.path.relpath(wt)} ━━", BOLD, color)

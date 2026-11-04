@@ -20,6 +20,7 @@ from .scheduling import Scheduling
 from .settings import (BOLD, CLAUDE_CONFIG_DIR, CLAUDE_PROTECTED, CODEX_HOME_DIR, CODEX_PROTECTED, CONFIG,
                        Fatal, GREEN, TICKET_COLORS, YELLOW)
 from .shipping import Shipping
+from .sync import GitHubSync
 from .text import section
 from .tickets import TicketImplementation
 from .verification import Verification
@@ -28,7 +29,7 @@ from .worktrees import WorktreeIntegration
 
 class Runner(
     AgentProcesses, Scheduling, TicketImplementation, WorktreeIntegration,
-    Prompts, Reviews, EpicReview, Verification, Shipping,
+    Prompts, Reviews, EpicReview, Verification, Shipping, GitHubSync,
 ):
     def __init__(self, a, root, folder, path, data, tickets, levels, skill, skills_dir, cfg, key=None):
         self.a, self.root, self.folder, self.path, self.data, self.cfg = a, root, folder, path, data, cfg
@@ -57,6 +58,7 @@ class Runner(
         self.state, self.integration, self.spawn = threading.RLock(), threading.Lock(), threading.Lock()
         self.children, self.threads, self.events = set(), {}, queue.Queue()
         self.stopping, self.fatal, self.finished = threading.Event(), None, False
+        self.sync_setup()
         self.costs()  # migrate legacy costs before any replaceable stage records are reset
         home = Path(__file__).resolve().parents[1]
         project = ["AGENTS.md", CONFIG, *cfg["linkFiles"], *([cfg["serveEnv"]] if cfg["serveEnv"] else []),
@@ -105,13 +107,6 @@ class Runner(
 
     def complete(self, n):
         return self.tickets[n]["state"] == "CLOSED" or self.data.get(str(n), {}).get("status") == "done"
-
-    def label(self, n, add, remove):
-        # Labels are convenience metadata; local state is authoritative.
-        result = subprocess.run(["gh", "issue", "edit", str(n), "--add-label", add, "--remove-label", remove],
-                                capture_output=True, text=True)
-        if result.returncode:
-            say(f"Warning: could not update labels for #{n}: {result.stderr.strip()}", YELLOW, err=True)
 
     def color(self, n):
         return TICKET_COLORS[self.order.index(n) % len(TICKET_COLORS)]
@@ -170,13 +165,17 @@ class Runner(
                         "fast-forward. Commit or stash them, then --resume. No files discarded.")
 
     def execute(self):
+        ended = False
         try:
-            return self.run()
+            outcome = self.run()
+            ended = True
+            return outcome
         finally:
             try:
                 self.report_costs()
             except Exception as exc:  # a cost report must never mask how the run ended
                 say(f"Warning: could not report costs ({exc})", YELLOW, err=True)
+            self.stop_sync(flush=ended)
             if self.finished:
                 self.retire_tree()
 
@@ -190,8 +189,10 @@ class Runner(
             if self.a.epic_only and not self.a.no_epic_review and rv.get("phase") in ("file", "fix") and \
                     set(remaining) <= self.review_fix_tickets(rv) and \
                     self.review_resumable(rv, git(self.tree, "rev-parse", "HEAD")):
+                self.start_sync()
                 return self.ended_stages()
             pending = self.preflight(self.selected)
+            self.start_sync()
             outcome = self.schedule(pending)
             return self.ended_stages() if outcome is None else outcome
         except BaseException:
@@ -199,6 +200,8 @@ class Runner(
             raise
 
     def ended_stages(self):
+        with self.state:
+            self.data.pop("_hold", None)
         outcome = self.stages()
         self.finished = outcome == 0
         return outcome
@@ -243,6 +246,14 @@ class Runner(
         """The epic itself needs a person: stop before the stages that follow."""
         self.update(rec, status=status, reason=reason)
         if status == "needs-human":
-            self.label(self.a.parent, "needs-human", "in-progress")
+            self.hold_epic(reason)
         say(f"Epic #{self.a.parent} {status}: {reason}", YELLOW, BOLD)
         return 1
+
+    def hold_epic(self, reason):
+        """The epic issue shows needs-human until a person unblocks it."""
+        with self.state:
+            self.data["_hold"] = {"reason": reason}
+            self.github().get("labels", {}).pop(str(self.a.parent), None)
+            self.persist()
+        self.nudge()

@@ -238,11 +238,7 @@ class AgentProcesses:
         note = "" if isinstance(total, str) else " (the agent CLI's estimate, not a bill)"
         body.write_text(f"{title} of epic #{self.a.parent} so far: {amount}{note}.\n\n"
                         + "\n".join(by_stage) + "\n\n" + "\n".join(by_ticket) + "\n")
-        result = subprocess.run(["gh", "issue", "comment", str(self.a.parent), "--body-file", str(body)],
-                                capture_output=True, text=True)
-        if result.returncode:
-            say(f"Warning: could not post the cost table on #{self.a.parent} ({result.stderr.strip()}); it is in "
-                f"{body}", YELLOW, err=True)
+        self.queue_costs(body)
 
     def cancel_children(self):
         """Prevent further spawns and terminate active process groups; joining belongs to the caller."""

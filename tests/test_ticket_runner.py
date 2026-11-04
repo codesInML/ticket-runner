@@ -67,6 +67,18 @@ with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(args)+'\\n')
 none={'totalCount':0, 'nodes':[]}
 issues_file = Path(os.environ['ISSUE_STATE'])
 issues = json.loads(issues_file.read_text()) if issues_file.exists() else {'created': [], 'closed': []}
+root = Path(os.environ['ROOT'])
+label_file = root / 'labels.json'
+board = json.loads(label_file.read_text()) if label_file.exists() else {'known': [], 'issues': {}}
+restricted = os.environ.get('LABELS_MUST_EXIST') == '1'
+writes = (['issue', 'edit'], ['issue', 'close'], ['issue', 'comment'], ['label', 'create'])
+if args[:2] in writes or (args[:2] == ['issue', 'view'] and any('labels' in a for a in args)):
+    if (root / 'gh-down').exists():
+        print('Post "https://api.github.com/graphql": dial tcp 140.82.121.5:443: i/o timeout', file=sys.stderr)
+        sys.exit(1)
+    if (root / 'gh-denied').exists() and args[:2] != ['issue', 'view']:
+        print('HTTP 403: Resource not accessible by integration', file=sys.stderr)
+        sys.exit(1)
 def everything():
     found = json.loads(os.environ['ISSUES']) + issues['created']
     for issue in found:
@@ -89,6 +101,23 @@ elif args[:2] == ['issue', 'create']:
 elif args[:2] == ['issue', 'close']:
     issues['closed'].append(int(args[2]))
     issues_file.write_text(json.dumps(issues))
+elif args[:2] == ['issue', 'edit']:
+    names = lambda flag: args[args.index(flag)+1].split(',') if flag in args else []
+    for name in names('--add-label') + names('--remove-label'):
+        if restricted and name not in board['known']:
+            print("failed to update https://github.com/acme/engine/issues/%s: '%s' not found" % (args[2], name), file=sys.stderr)
+            sys.exit(1)
+    mine = [l for l in board['issues'].get(args[2], []) if l not in names('--remove-label')]
+    board['issues'][args[2]] = mine + [l for l in names('--add-label') if l not in mine]
+    label_file.write_text(json.dumps(board))
+elif args[:2] == ['label', 'create']:
+    board['known'].append(args[2])
+    label_file.write_text(json.dumps(board))
+elif args[:2] == ['issue', 'view'] and any('labels' in a for a in args):
+    found = next((i for i in everything() if i['number'] == int(args[2])),
+                 {'title': 'Epic title', 'body': os.environ.get('PARENT_BODY', ''), 'state': 'OPEN'})
+    print(json.dumps({'labels': [{'name': l} for l in board['issues'].get(args[2], [])], 'state': found['state'],
+                      'title': found['title'], 'body': found['body']}))
 elif args[:2] == ['issue', 'view'] and any('body' in a for a in args):
     print(json.dumps({'title': 'Epic title', 'body': os.environ.get('PARENT_BODY', '')}))
 elif args[:2] == ['issue', 'view']: print('CLOSED')
@@ -302,7 +331,7 @@ sys.exit(8 if cap else 0)
         (self.root / "references").mkdir()
         (self.root / "references" / "definition-of-done.md").write_text("Done means done.\n")
         (self.root / ".gitignore").write_text("fake-bin/\n*.log\nskill.md\nskills/\nreferences/\nprs.json\n"
-                                            "issues.json\n")
+                                            "issues.json\nlabels.json\ngh-down\ngh-denied\n")
         (self.root / "AGENTS.md").write_text("# Agents\n")
         self.git("add", ".gitignore", "AGENTS.md")
         self.git("commit", "-qm", "Test setup")
@@ -372,6 +401,13 @@ sys.exit(8 if cap else 0)
             self.git("add", ".agents/ticket-runner.json")
             if self.git("diff", "--cached", "--name-only"):
                 self.git("commit", "-qm", "Configure the runner")
+
+    def board(self):
+        path = self.root / "labels.json"
+        return json.loads(path.read_text()) if path.exists() else {'known': [], 'issues': {}}
+
+    def labels(self, n):
+        return self.board()['issues'].get(str(n), [])
 
     def gh_calls(self):
         return [json.loads(line) for line in (self.root / "gh.log").read_text().splitlines()]
@@ -465,8 +501,7 @@ sys.exit(8 if cap else 0)
         state = self.state()
         self.assertEqual((state['209']['status'], state['210']['status']), ('done', 'done'))
         self.assertEqual(self.kinds(), ['implement', 'implement', 'epic review', 'epic review', 'cross', 'launch plan'])
-        self.assertIn(['issue', 'edit', '209', '--add-label', 'agent-done', '--remove-label', 'in-progress'],
-                      self.gh_calls())
+        self.assertEqual(self.labels(209), ['agent-done'])
         self.assertIn(['issue', 'close', '209'], [c[:3] for c in self.gh_calls()])
         self.assertFalse((self.root / '.scratch/worktrees/209').exists())
         self.assertEqual(self.git('branch', '--list', 'cc/207/209'), '')
@@ -832,6 +867,111 @@ sys.exit(8 if cap else 0)
                                 env=dict(self.env, ISSUES=json.dumps(self.issues), MODE='success'))
         self.assertEqual(result.returncode, 1)
         self.assertIn("run this from the project's own folder", result.stderr)
+
+    # ── GitHub sync ──────────────────────────────────────────────────────
+
+    def edits(self, n, since=0):
+        return [c for c in self.gh_calls()[since:] if c[:3] == ['issue', 'edit', str(n)]]
+
+    def outage(self, name='gh-down'):
+        (self.root / name).write_text('')
+        self.env.update(TICKET_RUNNER_POLL_SECONDS='0.05', TICKET_RUNNER_FLUSH_SECONDS='0.3')
+
+    def test_labels_follow_each_tickets_status(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual((self.labels(209), self.labels(210)), (['agent-done'], ['agent-done']))
+        self.setUp()
+        self.assertEqual(self.run_script(mode='human').returncode, 1)
+        self.assertEqual(self.labels(209), ['needs-human'])
+        self.setUp()
+        self.assertEqual(self.run_script(mode='cap').returncode, 1)
+        self.assertEqual(self.labels(209), ['ready-for-agent'])
+
+    def test_a_github_outage_never_holds_up_the_work_and_the_next_run_catches_up(self):
+        self.outage()
+        result = self.run_script(mode='dispute')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()['_ship']['status'], 'pr-open')
+        self.assertIn('Could not reach GitHub', result.stderr)
+        self.assertEqual(result.stderr.count('Could not reach GitHub'), 1)  # Said once per outage, not per retry.
+        self.assertIn('Not on GitHub yet', result.stderr)
+        self.assertEqual(self.labels(209), [])
+        self.assertNotIn('closed', self.state()['_review'])
+        (self.root / 'gh-down').unlink()
+        before = len(self.gh_calls())
+        result = self.run_script('--epic-only')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Not on GitHub yet', result.stderr)
+        self.assertEqual((self.labels(209), self.labels(210)), (['agent-done'], ['agent-done']))
+        # Only the current status is ever sent, not the steps it missed.
+        self.assertEqual(len(self.edits(209, before)), 1)
+        self.assertEqual(self.edits(209, before)[0][4], 'agent-done')
+        self.assertEqual(sorted(self.state()['_review']['closed']), [209, 210])
+        self.assertEqual(len([c for c in self.gh_calls()[before:] if c[:2] == ['issue', 'comment']]), 1)  # findings
+
+    def test_an_update_recovers_during_the_run_once_github_is_back(self):
+        self.outage()
+        self.env.update(TICKET_RUNNER_FLUSH_SECONDS='60')
+        env = dict(self.env, ISSUES=json.dumps(self.issues), MODE='success')
+        self.free_main_folder()
+        runner = subprocess.Popen(self.argv('--no-epic-review'), cwd=self.root, env=env, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: runner.kill() if runner.poll() is None else None)
+        import time
+        state = self.root / '.scratch/run-tickets-commandcode/207/state.json'
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            data = json.loads(state.read_text()) if state.exists() else {}
+            if data.get('210', {}).get('status') == 'done':
+                break
+            time.sleep(.05)
+        self.assertEqual(self.labels(209), [])
+        (self.root / 'gh-down').unlink()
+        _, errors = runner.communicate(timeout=30)
+        self.assertEqual(runner.returncode, 0, errors)
+        self.assertEqual(self.labels(209), ['agent-done'])
+        self.assertIn('reachable again', _)
+
+    def test_a_real_github_error_is_reported_once_and_not_retried(self):
+        self.outage('gh-denied')
+        result = self.run_script('--no-epic-review')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count('could not label #209'), 1)
+        self.assertIn('HTTP 403', result.stderr)
+        self.assertNotIn('Could not reach GitHub', result.stderr)
+        self.assertNotIn('Not on GitHub yet', result.stderr)
+
+    def test_a_persons_label_edit_is_never_undone(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        board = self.board()
+        board['issues']['209'] = []
+        (self.root / 'labels.json').write_text(json.dumps(board))
+        before = len(self.gh_calls())
+        self.assertEqual(self.run_script('--epic-only').returncode, 0)
+        self.assertEqual(self.edits(209, before), [])
+        self.assertEqual(self.labels(209), [])
+
+    def test_a_missing_label_being_added_is_created_and_one_being_removed_is_not(self):
+        self.env['LABELS_MUST_EXIST'] = '1'
+        (self.root / 'labels.json').write_text(json.dumps({'known': ['agent-done'], 'issues': {}}))
+        result = self.run_script(mode='fix')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.labels(209), ['agent-done'])
+        creates = [c for c in self.gh_calls() if c[:2] == ['label', 'create']]
+        self.assertEqual(sorted(c[2] for c in creates), ['epic-review-fix', 'in-progress'])
+        self.assertTrue(all('--force' not in c and '--color' in c and '--description' in c for c in creates))
+        self.assertNotIn('ready-for-agent', self.board()['known'])
+        self.assertEqual(self.labels(400), ['epic-review-fix', 'agent-done'])
+
+    def test_a_label_that_cannot_be_created_is_a_real_error(self):
+        self.env['LABELS_MUST_EXIST'] = '1'
+        gh = (self.bin / 'gh').read_text()
+        (self.bin / 'gh').write_text(gh.replace("elif args[:2] == ['label', 'create']:\n",
+                                                "elif args[:2] == ['label', 'create']:\n    print('HTTP 403: nope', file=sys.stderr); sys.exit(1)\n"))
+        result = self.run_script('--no-epic-review')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count('could not label #209'), 1)
+        self.assertEqual(self.state()['209']['status'], 'done')
 
     # ── osmani workflow ──────────────────────────────────────────────────
 
@@ -1434,8 +1574,7 @@ sys.exit(8 if cap else 0)
         wt = self.root / '.scratch/worktrees/verify-207'
         self.assertTrue((wt / 'other.txt').exists())
         self.assertFalse((self.root / 'other.txt').exists())
-        self.assertIn(['issue', 'edit', '207', '--add-label', 'needs-human', '--remove-label', 'in-progress'],
-                      self.gh_calls())
+        self.assertEqual(self.labels(207), ['needs-human'])
         # A person fixes it in the kept worktree; the next run re-verifies without another repair.
         (wt / 'fixed.txt').write_text('by hand')
         subprocess.run(['git', 'add', 'fixed.txt'], cwd=wt, check=True)
