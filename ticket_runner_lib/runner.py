@@ -76,8 +76,9 @@ class Runner(
         # is watched (and an uncommitted config, which then is the config): that folder may change branch freely.
         local = [*cfg["linkFiles"], *([cfg["serveEnv"]] if cfg["serveEnv"] else []),
                  *([] if (self.tree / CONFIG).exists() else [CONFIG])]
-        protected = [*own, *(self.tree / f for f in project if not f.endswith("/") and not f.startswith(":(glob)")),
-                     *(self.tree / f for f in claude_dir if f), *(root / f for f in local)]
+        single_files = lambda names: [f for f in names if not f.endswith("/") and not f.startswith(":(glob)")]
+        protected = [*own, *(self.tree / f for f in single_files(project)),
+                     *(self.tree / f for f in claude_dir if f), *(root / f for f in single_files(local))]
         # A protected file that is missing now must stay missing: an agent creating one counts as changing it.
         self.instruction_paths = self.claude_instructions() if self.claude else set()
         if self.backend.name == "codex":

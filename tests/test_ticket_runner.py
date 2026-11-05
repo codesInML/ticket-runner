@@ -1644,6 +1644,17 @@ sys.exit(8 if cap else 0)
         probes = [json.loads(line) for line in (self.root / "probe.jsonl").read_text().splitlines()]
         self.assertEqual(probes, [{'link': True, 'deps': True}] * 2)
 
+    def test_a_linked_directory_is_linked_but_not_snapshotted(self):
+        (self.root / "shared").mkdir()
+        (self.root / "shared/notes.md").write_text("notes")
+        with (self.root / ".gitignore").open("a") as f:
+            f.write("/shared\n")
+        self.git("add", ".gitignore")
+        self.configure(linkFiles=["shared/"])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Is a directory", result.stderr)
+
     def test_agent_changing_the_config_stops_the_run(self):
         self.configure(gate=["true"])
         result = self.run_script(mode='edit-config')
