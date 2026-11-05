@@ -112,7 +112,7 @@ class RepairResumeTests(unittest.TestCase):
     def review(self, phase):
         review = EpicReview()
         review.a = SimpleNamespace(workflow='pocock', epic_review_models=['glm'])
-        review.root = '/repo'
+        review.tree = '/repo'
         review.review_fingerprint = lambda rv=None: 'same'
         rv = {'protocol': 3, 'workflow': 'pocock', 'models': ['glm'], 'fingerprint': 'same', 'phase': phase,
               'start': 'start', 'fixHead': 'fixhead'}

@@ -19,7 +19,7 @@ class TicketImplementation:
             tdir = self.folder / str(n)
             tdir.mkdir(parents=True, exist_ok=True)
             (tdir / "ticket.md").write_text(f"# #{n} — {self.tickets[n]['title']}\n\n{self.tickets[n]['body']}")
-            phase = record.get("phase") if self.a.resume else None
+            phase = record.get("phase") if self.continuing(n) else None
             if phase == "escalate":
                 self.resume_escalation(n, record, tdir)
             elif phase not in ("review", "fix", "integrate"):
@@ -43,15 +43,14 @@ class TicketImplementation:
             self.events.put(n)
 
     def fail(self, n, record, status, reason):
-        self.update(record, status=status, reason=reason)
-        self.label(n, "needs-human" if status in {"needs-human", "awaiting-human"} else "ready-for-agent",
-                   "in-progress")
+        self.update(record, status=status, reason=reason, drop=("unblocked",))
+        self.nudge()
         say(f"#{n} {status}: {reason}", YELLOW, BOLD)
 
     def implement(self, n, record, tdir):
         branch, wt = self.branch(n), self.worktrees / str(n)
         answered = record.get("status") == "awaiting-human"
-        session = record.get("sessionId") if self.a.resume and (
+        session = record.get("sessionId") if self.continuing(n) and (
             record.get("status") in RETRYABLE or answered) else None
         with self.integration:
             if self.stopping.is_set():
@@ -77,7 +76,7 @@ class TicketImplementation:
                              "session; commit or discard there, then --resume")
         self.update(record, status="in-progress", phase="implement", base=base, branch=branch,
                     worktree=str(wt), drop=() if session else ("sessionId", "reason"))
-        self.label(n, "in-progress", "ready-for-agent")
+        self.nudge()
         color = self.color(n)
         say(f"\n━━ #{n}: {'resuming' if session else 'implementing'} with {self.a.model} "
             f"in {os.path.relpath(wt)} ━━", BOLD, color)
@@ -114,9 +113,6 @@ exactly one line for the work as it stands: STATUS=COMPLETE, STATUS=NEEDS_HUMAN,
             text = self.run_agent(self.a.model, self.a.effort, self.a.max_turns, nudge, tdir / "status", record,
                                   record["sessionId"], cwd=wt, tag=f"#{n}", color=color)
             self.guard()
-        if record["status"] == "budget-cap":
-            return self.fail(n, record, "budget-cap", f"partial work kept in {os.path.relpath(wt)}; the budget ran "
-                             "out, not the ticket: --resume continues it with a fresh budget")
         if record["status"] != "reported":
             return self.fail(n, record, record["status"], f"partial work kept in {os.path.relpath(wt)}; retry with "
                              f"--resume --max-turns {self.a.max_turns * 2}")
@@ -143,7 +139,7 @@ exactly one line for the work as it stands: STATUS=COMPLETE, STATUS=NEEDS_HUMAN,
         commits = int(git(wt, "rev-list", "--count", f"{record['base']}..HEAD"))
         if not commits:
             with self.integration:
-                self.finish(n, record, git(self.root, "rev-parse", "HEAD"))
+                self.finish(n, record, git(self.tree, "rev-parse", "HEAD"))
                 say(f"#{n} complete with no commits; nothing to review or integrate", GREEN, BOLD)
                 self.cleanup(n)
         elif self.osmani:
@@ -164,7 +160,7 @@ exactly one line for the work as it stands: STATUS=COMPLETE, STATUS=NEEDS_HUMAN,
         with self.state:
             rec = record.setdefault("escalation", {}).setdefault(kind, {})
         head = git(wt, "rev-parse", "HEAD")
-        session = rec.get("sessionId") if self.a.resume and (rec.get("status") in RETRYABLE or answered) \
+        session = rec.get("sessionId") if self.continuing(n) and (rec.get("status") in RETRYABLE or answered) \
             and rec.get("head") == head else None
         self.update(rec, why=why, reports=[str(r) for r in reports], **review, drop=() if session else ("sessionId",))
         self.update(record, status="in-progress", phase="escalate", escalating=kind)

@@ -8,11 +8,11 @@ import shutil
 import subprocess
 import time
 
-from .display import dollars, say
+from .display import say
 from .github import discover, gh_json
 from .graph import waves
 from .processes import attempt, dirty, git
-from .settings import BLUE, BOLD, CLAUDE_MODELS, DIM, FIX_LABEL, GREEN, MODELS, RETRYABLE, REVIEW_PROTOCOL, YELLOW
+from .settings import BLUE, BOLD, CLAUDE_MODELS, CODEX_MODELS, DIM, GREEN, MODELS, RETRYABLE, REVIEW_PROTOCOL, YELLOW
 from .text import empty, review_rows, says_none, section, verdict
 
 
@@ -30,7 +30,8 @@ ENDS = {"review": (r"VERDICT=(SHIP|FIX-FIRST)", "VERDICT=SHIP when nothing is BL
 
 def reviewer_name(model):
     """The name a person calls a model by: its alias (deepseek over flash), else its last path part."""
-    names = [alias for aliases in (MODELS, CLAUDE_MODELS) for alias, full in aliases.items() if full == model]
+    known = (MODELS, CLAUDE_MODELS, {"luna": CODEX_MODELS["luna"]})
+    names = [alias for aliases in known for alias, full in aliases.items() if full == model]
     return "deepseek" if "deepseek" in names else names[0] if names else model.rsplit("/", 1)[-1]
 
 
@@ -83,18 +84,18 @@ class EpicReview:
         if phase in ("review", "check", "tickets", "file"):
             return head == rv["start"]
         if phase == "fix":  # Fix tickets integrating move the epic on from where the review started.
-            return not attempt(self.root, "merge-base", "--is-ancestor", rv["start"], head).returncode
+            return not attempt(self.tree, "merge-base", "--is-ancestor", rv["start"], head).returncode
         if phase in ("follow", "follow-check"):
             return head == rv.get("fixHead")
         if phase in ("blocked", "repair"):  # A person's fixes on the epic branch get the repair review.
             return bool(rv.get("fixHead")) and \
-                not attempt(self.root, "merge-base", "--is-ancestor", rv["fixHead"], head).returncode
+                not attempt(self.tree, "merge-base", "--is-ancestor", rv["fixHead"], head).returncode
         return False
 
     def epic_review(self):
-        if dirty(self.root):
+        if dirty(self.tree):
             raise RuntimeError("Epic review requires a clean tree")
-        head = git(self.root, "rev-parse", "HEAD")
+        head = git(self.tree, "rev-parse", "HEAD")
         rv = self.data.get("_review", {})
         if self.review_covers(head):
             say(f"Epic review already said SHIP for {head[:8]}; skipping. Report: "
@@ -143,12 +144,12 @@ class EpicReview:
         A report without the step's end line gets one nudge into its session. None when the main worktree
         changed; an unfinished session is left in rv["stopped"] for stopped().
         """
-        a, head = self.a, git(self.root, "rev-parse", "HEAD")
+        a, head = self.a, git(self.tree, "rev-parse", "HEAD")
         self.update(rv, status="in-progress", drop=("reason",))
         jobs = []
         for r in todo:
             # Later steps resume the reviewer's own session: it already knows the code.
-            retry = a.resume and r.get("status") in RETRYABLE and r.get("step") == step
+            retry = self.resuming and r.get("status") in RETRYABLE and r.get("step") == step
             session = r.get("sessionId") if step != "review" or retry else None
             self.update(r, step=step, drop=() if session else ("sessionId",))
             folder, text = self.review_dir() / r["dir"] / step, prompt(r)
@@ -178,8 +179,8 @@ exactly one line for your report as it stands: {line}.
                 # The steps parse the whole report, so only the reply's line joins it.
                 texts[i] = f"{texts[i].rstrip()}\n{reply.strip().splitlines()[-1]}" if reply.strip() else texts[i]
             self.guard()
-        if dirty(self.root) or git(self.root, "rev-parse", "HEAD") != head:
-            self.epic_fail(rv, "needs-human", "an epic reviewer changed the main worktree, but the review must be "
+        if dirty(self.tree) or git(self.tree, "rev-parse", "HEAD") != head:
+            self.epic_fail(rv, "needs-human", "an epic reviewer changed the epic worktree, but the review must be "
                            "read-only; inspect it, then --epic-only")
             return None
         stopped = [r for r in todo if r["status"] != "reported"]
@@ -409,6 +410,7 @@ exactly one line for your report as it stands: {line}.
                 continue
             number = next((i["number"] for i in existing if marker in (i.get("body") or "")), None)
             if number is not None:
+                self.link_fix_ticket(number)  # A lost reply may have cost its link too.
                 return number, None
             created = subprocess.run(["gh", "issue", "create", "--title", title, "--body-file", str(path)],
                                      capture_output=True, text=True)
@@ -427,26 +429,6 @@ exactly one line for your report as it stands: {line}.
             f"{body.rstrip()}\n\n## Blocked by\n{blockers}\n"
         return (f"## Parent\n#{self.a.parent}\n\nFiled by the epic review of #{self.a.parent} at `{rv['start'][:8]}` "
                 f"to fix its confirmed findings.\n\n{body.strip()}\n\n{marker}\n")
-
-    def link_fix_ticket(self, n):
-        """Label the fix ticket and make it a native sub-issue; the `## Parent` section already makes it one."""
-        if not getattr(self, "_fix_label", False):
-            subprocess.run(["gh", "label", "create", FIX_LABEL, "--color", "D93F0B", "--force", "--description",
-                            "Filed by the ticket runner's epic review"], capture_output=True, text=True)
-            self._fix_label = True
-        problems = []
-        result = subprocess.run(["gh", "issue", "edit", str(n), "--add-label", FIX_LABEL], capture_output=True, text=True)
-        if result.returncode:
-            problems.append(f"label: {result.stderr.strip()}")
-        found = subprocess.run(["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{n}", "--jq", ".id"],
-                               capture_output=True, text=True)
-        linked = found if found.returncode else subprocess.run(
-            ["gh", "api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{self.a.parent}/sub_issues",
-             "-F", f"sub_issue_id={found.stdout.strip()}"], capture_output=True, text=True)
-        if found.returncode or linked.returncode:
-            problems.append(f"sub-issue link: {(linked.stderr or found.stderr).strip()}")
-        if problems:
-            say(f"Warning: #{n} filed, but {'; '.join(problems)}", YELLOW, err=True)
 
     def refresh_tickets(self, numbers):
         """Discover the epic again, so filed fix tickets join the graph; the numbers discovery did not find."""
@@ -470,7 +452,7 @@ exactly one line for your report as it stands: {line}.
             outcome_ = self.schedule(self.preflight(todo))
             if outcome_ is not None:
                 return outcome_
-        self.update(rv, phase="follow", fixHead=git(self.root, "rev-parse", "HEAD"))
+        self.update(rv, phase="follow", fixHead=git(self.tree, "rev-parse", "HEAD"))
 
     def follow_up(self, rv):
         """The reviewers read only the fix diff: each confirmed finding FIXED or NOT FIXED, and any regression."""
@@ -525,7 +507,7 @@ exactly one line for your report as it stands: {line}.
 
     def still_blocked(self, rv):
         """Blocked until a person commits on the epic branch; their commits get the repair review."""
-        if git(self.root, "rev-parse", "HEAD") != rv.get("repairHead", rv["fixHead"]):
+        if git(self.tree, "rev-parse", "HEAD") != rv.get("repairHead", rv["fixHead"]):
             self.update(rv, phase="repair")
             return None
         return self.epic_fail(rv, "needs-human", rv.get("reason") or "the epic review is still blocked")
@@ -543,7 +525,7 @@ exactly one line for your report as it stands: {line}.
 
         Never a fresh review: the epic was reviewed whole once, so later rounds judge only what changed.
         """
-        head, targets, r = git(self.root, "rev-parse", "HEAD"), self.unresolved(rv), rv["reviewers"][-1]
+        head, targets, r = git(self.tree, "rev-parse", "HEAD"), self.unresolved(rv), rv["reviewers"][-1]
         if not targets:
             return self.review_ship(rv)
         texts = self.run_reviewers(rv, [r], "repair", lambda r: self.epic_repair_prompt(rv, r, targets))
@@ -579,7 +561,7 @@ exactly one line for your report as it stands: {line}.
                               "branch, then --epic-only reviews the repair again")
 
     def review_ship(self, rv):
-        head = git(self.root, "rev-parse", "HEAD")
+        head = git(self.tree, "rev-parse", "HEAD")
         self.update(rv, status="ship", head=head, phase=None, drop=("reason",))
         self.write_report(rv)
         self.post_findings(rv)
@@ -590,24 +572,8 @@ exactly one line for your report as it stands: {line}.
 
     def close_tickets(self, rv):
         """Every sub-ticket closes once the epic review says SHIP; the epic itself stays open."""
-        closed = rv.setdefault("closed", [])
-        for n in self.order:
-            if n in closed or self.tickets[n]["state"] == "CLOSED":
-                continue
-            spent = [c["costUsd"] for owner, c in self.costs() if owner == f"#{n}" and "costUsd" in c]
-            cost = f" Cost: {dollars(sum(spent))} (estimated)." \
-                if spent and getattr(self.a, "post_costs", False) else ""
-            result = subprocess.run(["gh", "issue", "close", str(n), "--comment",
-                                     f"Integrated into `{self.epic}` at `{rv['head'][:8]}`; the epic review of "
-                                     f"#{self.a.parent} said SHIP.{cost}"], capture_output=True, text=True)
-            if result.returncode:
-                say(f"Warning: could not close #{n} ({result.stderr.strip()}); the next run tries again",
-                    YELLOW, err=True)
-                continue
-            with self.state:
-                closed.append(n)
-                self.persist()
-            say(f"Closed #{n}", DIM)
+        self.update(rv, closeAt=rv["head"])
+        self.nudge()
 
     def report_sections(self, rv):
         names = {r["model"]: r["name"] for r in rv["reviewers"]}
@@ -659,10 +625,5 @@ exactly one line for your report as it stands: {line}.
         body.write_text(f"Findings from the epic review of #{self.a.parent} at `{rv['start'][:8]}` that block "
                         "nothing: deferred ones the epic does not own, and disputed ones the reviewers disagree "
                         "on, with both sides' evidence.\n\n" + "\n\n".join(parts) + "\n")
-        result = subprocess.run(["gh", "issue", "comment", str(self.a.parent), "--body-file", str(body)],
-                                capture_output=True, text=True)
-        if result.returncode:
-            return say(f"Warning: could not post the epic review's findings on #{self.a.parent} "
-                       f"({result.stderr.strip()}); they are in {body}", YELLOW, err=True)
-        self.update(rv, posted=rv["start"])
-        say(f"Posted the epic review's deferred and disputed findings on #{self.a.parent}", DIM)
+        self.update(rv, findingsAt=rv["start"])
+        self.nudge()

@@ -71,7 +71,7 @@ if mode == 'max-turns' and ticket == '209' and not resumed:
         time.sleep(.1)
     (root / 'fake-bin/escaped-cap').write_text('bad')
 if mode.startswith('edit:'):
-    path = root / mode.split(':', 1)[1]
+    path = root / '.scratch/epics/207' / mode.split(':', 1)[1]
     path.parent.mkdir(parents=True, exist_ok=True); path.write_text('injected')
 if mode.startswith('commit:'):
     path = Path(mode.split(':', 1)[1]); path.parent.mkdir(parents=True, exist_ok=True); path.write_text('injected')
@@ -164,9 +164,9 @@ class CodexBackendTests(base.RunnerTests):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('Agent modified', result.stderr + result.stdout)
                 if path == 'src/AGENTS.md':
-                    (self.root / path).write_text('original')
+                    (self.checkout() / path).write_text('original')
                 else:
-                    (self.root / path).unlink()
+                    (self.checkout() / path).unlink()
                 self.git('worktree', 'remove', '--force', str(self.root / '.scratch/worktrees/209'))
                 self.git('branch', '-D', 'cc/207/209')
                 state = self.root / '.scratch/run-tickets-commandcode/207/state.json'

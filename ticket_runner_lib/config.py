@@ -129,6 +129,9 @@ def plan_stages(a, cfg, data, open_tickets, head):
         rec = data.get(key, {})
         return rec.get("head") == head and rec.get("status") in ok
     lines = [paint("Stages:", BOLD)]
+    branch = a.branch or data.get("_meta", {}).get("branch")
+    if branch:
+        lines.append(f"  epic branch  {branch}, in its own worktree at .scratch/epics/{a.parent}")
     if a.epic_only:
         lines.append("  tickets      skipped (--epic-only)")
     else:
@@ -156,10 +159,12 @@ def plan_stages(a, cfg, data, open_tickets, head):
         lines.append("  ship         skipped (--no-ship)")
     else:
         merge = f"; then --merge ({cfg['mergeMethod']}) once CI is green" if a.merge else ""
-        into = cfg["prBase"] or "origin's default branch"
+        into = a.pr_base or data.get("_meta", {}).get("prBase") or a.from_branch or cfg["prBase"] \
+            or "origin's default branch"
         lines.append("  ship         " + (f"pull request already open at {head[:8]}" if held("_ship", ("pr-open", "merged"))
                                           else f"launch plan ({a.launch_plan_model}), push, pull request into {into}")
                      + merge + " (only on a SHIP verdict)")
+    lines.append("A ticket or the epic that needs a person waits; removing needs-human from its issue continues it.")
     return "\n".join(lines)
 
 

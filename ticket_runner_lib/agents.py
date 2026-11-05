@@ -28,7 +28,7 @@ class AgentProcesses:
     def run_agent(self, model, effort, turns, prompt, folder, record, session=None, cwd=None,
                   tag="review", color=BLUE, browser=False, stage="implement"):
         """One agent session on the run's backend; its final text. `stage` names its cost."""
-        cwd = cwd or self.root
+        cwd = cwd or self.tree
         instructions = self.codex_snapshot(cwd) if self.backend.name == "codex" else None
         folder.mkdir(parents=True, exist_ok=True)
         if session and record.get("backend", "commandcode") != self.backend.name:
@@ -234,11 +234,7 @@ class AgentProcesses:
         note = "" if isinstance(total, str) else " (the agent CLI's estimate, not a bill)"
         body.write_text(f"{title} of epic #{self.a.parent} so far: {amount}{note}.\n\n"
                         + "\n".join(by_stage) + "\n\n" + "\n".join(by_ticket) + "\n")
-        result = subprocess.run(["gh", "issue", "comment", str(self.a.parent), "--body-file", str(body)],
-                                capture_output=True, text=True)
-        if result.returncode:
-            say(f"Warning: could not post the cost table on #{self.a.parent} ({result.stderr.strip()}); it is in "
-                f"{body}", YELLOW, err=True)
+        self.queue_costs(body)
 
     def cancel_children(self):
         """Prevent further spawns and terminate active process groups; joining belongs to the caller."""

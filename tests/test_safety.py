@@ -9,13 +9,27 @@ import time
 import unittest
 from unittest.mock import patch
 
-from ticket_runner_lib.github import native_links
+from ticket_runner_lib.github import missing_labels, native_links, transient
 from ticket_runner_lib.processes import kill, probe, remote
 from ticket_runner_lib.verification import Verification
 from types import SimpleNamespace
 
 
 class SafetyTests(unittest.TestCase):
+    def test_a_label_github_cannot_find_is_named_in_any_of_its_wordings(self):
+        self.assertEqual(missing_labels("failed to update https://github.com/o/r/issues/1: 'needs-human' not found"),
+                         ['needs-human'])
+        self.assertEqual(missing_labels('labels not found: in-progress, agent-done'), ['in-progress', 'agent-done'])
+        self.assertEqual(missing_labels('HTTP 404: Not Found'), [])
+
+    def test_only_github_being_out_of_reach_is_retried(self):
+        for said in ('Post "https://api.github.com/graphql": dial tcp 140.82.121.5:443: i/o timeout',
+                     'HTTP 502: Bad Gateway', 'API rate limit exceeded', 'error connecting to api.github.com', ''):
+            self.assertTrue(transient(said), said)
+        for said in ('HTTP 403: Resource not accessible by integration', 'Could not resolve to an issue',
+                     "'needs-human' not found"):
+            self.assertFalse(transient(said), said)
+
     def test_remote_git_retries_only_while_the_network_is_down(self):
         offline = subprocess.CompletedProcess([], 128, "", "fatal: unable to access 'https://github.com/o/r.git/': "
                                               "Failed to connect to github.com port 443: Couldn't connect to server")

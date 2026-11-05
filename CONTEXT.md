@@ -10,6 +10,18 @@ The parent GitHub issue and the branch its tickets integrate into; the unit the 
 ships.
 _Avoid_: Spec (for the branch), feature
 
+**Epic branch**:
+The branch an epic's tickets integrate into, named once and saved with the epic.
+_Avoid_: Active branch, merge target
+
+**Epic worktree**:
+The epic branch's own working copy for the life of a run, apart from the operator's folder.
+_Avoid_: Main worktree (for this copy)
+
+**PR target**:
+The branch an epic's pull request goes to, saved with the epic.
+_Avoid_: Base branch, merge target
+
 **Ticket**:
 A sub-issue of the epic that one agent implements in its own worktree and the runner integrates into the
 epic branch.
@@ -27,6 +39,16 @@ The skill set an epic's prompts follow: pocock or osmani.
 The agent CLI and account every session of a run uses: commandcode, claude (Claude Code on the operator's
 subscription), or codex (the Codex CLI on the operator's ChatGPT subscription).
 _Avoid_: Engine, harness, provider
+
+## Waiting on a person
+
+**Unblock**:
+A person removing `needs-human` from a ticket or epic issue, which the waiting run takes as its cue to continue that issue.
+_Avoid_: Resume (the operator restarting a run), retry
+
+**Sync**:
+The run comparing what its saved state says GitHub should show with what GitHub last confirmed, and sending the difference.
+_Avoid_: Retry queue, outbox
 
 ## Stages
 
