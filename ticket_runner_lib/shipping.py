@@ -5,7 +5,7 @@ import subprocess
 
 from .display import say
 from .github import gh_json
-from .processes import attempt, command, dirty, git
+from .processes import attempt, command, dirty, git, remote
 from .settings import BLUE, BOLD, CONFIG, DIM, GREEN, RETRYABLE
 from .text import empty, section
 
@@ -20,7 +20,7 @@ class Shipping:
     def ship(self):
         """Launch plan, push and pull request for a SHIP verdict; with --merge, merge once CI is green."""
         a, rec = self.a, self.data.setdefault("_ship", {})
-        head = git(self.root, "rev-parse", "HEAD")
+        head = git(self.tree, "rev-parse", "HEAD")
         verify = self.data.get("_verify", {})
         verified = not a.no_verify and verify.get("status") == "pass" and verify.get("head") == head
         evidence = self.evidence(head)
@@ -58,7 +58,7 @@ class Shipping:
         if plan.get("status") == "done" and plan.get("head") == head and (sdir / "launch-plan.md").exists():
             say(f"Launch plan already written for {head[:8]}: {os.path.relpath(sdir / 'launch-plan.md')}", DIM)
             return True
-        session = plan.get("sessionId") if a.resume and plan.get("status") in RETRYABLE \
+        session = plan.get("sessionId") if self.resuming and plan.get("status") in RETRYABLE \
             and plan.get("head") == head else None
         self.update(plan, drop=() if session else ("sessionId",))
         base, report = self.data["_meta"]["epicBase"], self.folder / "verify" / "report.md"
@@ -87,8 +87,8 @@ Read-only: do not edit files, commit, change branches, push, open pull requests,
 {self.agent_rule()}""", sdir / "plan", plan, session, tag="launch plan", color=self.stage_color(5),
                              stage="launch plan")
         self.guard()
-        if dirty(self.root) or git(self.root, "rev-parse", "HEAD") != head:
-            self.epic_fail(rec, "needs-human", "the launch plan agent changed the main worktree, but it must be "
+        if dirty(self.tree) or git(self.tree, "rev-parse", "HEAD") != head:
+            self.epic_fail(rec, "needs-human", "the launch plan agent changed the epic worktree, but it must be "
                            "read-only; inspect it, then --epic-only")
             return False
         if plan["status"] != "reported":
@@ -106,31 +106,33 @@ Read-only: do not edit files, commit, change branches, push, open pull requests,
     def push(self, rec):
         """Push the epic branch; never over commits the remote has that the epic lacks."""
         branch = self.epic
-        remote = attempt(self.root, "ls-remote", "--exit-code", "--heads", "origin", branch)
-        if remote.returncode not in (0, 2):
-            self.epic_fail(rec, "needs-human", f"could not read origin: {remote.stderr.strip()}")
+        heads = remote(self.tree, "ls-remote", "--exit-code", "--heads", "origin", branch)
+        if heads.returncode not in (0, 2):
+            self.epic_fail(rec, "needs-human", f"could not read origin: {heads.stderr.strip()}")
             return False
-        if remote.returncode == 0:
-            theirs = remote.stdout.split()[0]
-            fetched = attempt(self.root, "fetch", "-q", "origin", f"refs/heads/{branch}")
+        if heads.returncode == 0:
+            theirs = heads.stdout.split()[0]
+            fetched = remote(self.tree, "fetch", "-q", "origin", f"refs/heads/{branch}")
             if fetched.returncode:
                 self.epic_fail(rec, "needs-human", f"could not fetch origin/{branch}: {fetched.stderr.strip()}")
                 return False
-            if attempt(self.root, "merge-base", "--is-ancestor", theirs, branch).returncode:
+            if attempt(self.tree, "merge-base", "--is-ancestor", theirs, branch).returncode:
                 self.epic_fail(rec, "needs-human", f"origin/{branch} has commits that {branch} lacks; integrate "
                                "them by hand (the runner never force-pushes), then --epic-only")
                 return False
         say(f"Pushing {branch} to origin", BOLD)
-        pushed = attempt(self.root, "push", "-u", "origin", branch)
+        pushed = remote(self.tree, "push", "-u", "origin", branch)
         if pushed.returncode:
             self.epic_fail(rec, "needs-human", f"git push failed: {pushed.stderr.strip()}")
             return False
         return True
 
     def pr_base(self):
+        if self.data["_meta"].get("prBase"):
+            return self.data["_meta"]["prBase"]
         if self.cfg["prBase"]:
             return self.cfg["prBase"]
-        found = attempt(self.root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").stdout.strip()
+        found = attempt(self.tree, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").stdout.strip()
         if found:
             return found.split("/", 1)[1]
         return command("gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name")
@@ -157,8 +159,8 @@ Read-only: do not edit files, commit, change branches, push, open pull requests,
         a, sdir, branch = self.a, self.folder / "ship", self.epic
         parent = self.parent_issue()
         base_commit = self.data["_meta"]["epicBase"]
-        commits = git(self.root, "rev-list", "--count", f"{base_commit}..{head}")
-        stat = git(self.root, "diff", "--shortstat", base_commit, head) or "no file changes"
+        commits = git(self.tree, "rev-list", "--count", f"{base_commit}..{head}")
+        stat = git(self.tree, "diff", "--shortstat", base_commit, head) or "no file changes"
         tickets = "\n".join(f"- #{n} {self.tickets[n]['title']}" for n in self.order)
         parts = [f"Epic #{a.parent}: {parent.get('title', '')}", "",
                  f"{commits} commits from `{base_commit[:8]}` to `{head[:8]}`: {stat.strip()}.", "",
@@ -175,11 +177,11 @@ Read-only: do not edit files, commit, change branches, push, open pull requests,
         try:
             found = gh_json("pr", "list", "--head", branch, "--state", "open", "--json", "number,url")
             if found:
-                command("gh", "pr", "edit", str(found[0]["number"]), "--body-file", str(body))
+                command("gh", "pr", "edit", str(found[0]["number"]), "--body-file", str(body), cwd=self.tree)
                 say(f"Updated pull request #{found[0]['number']}: {found[0]['url']}", GREEN, BOLD)
             else:
                 command("gh", "pr", "create", "--base", self.pr_base(), "--head", branch, "--title", title,
-                        "--body-file", str(body))
+                        "--body-file", str(body), cwd=self.tree)
                 found = gh_json("pr", "list", "--head", branch, "--state", "open", "--json", "number,url")
                 if not found:
                     raise RuntimeError("gh pr create succeeded but no open pull request lists the branch")
@@ -205,7 +207,7 @@ Read-only: do not edit files, commit, change branches, push, open pull requests,
         if problems:
             return self.epic_fail(rec, "merge-refused", "--merge refused: " + "; ".join(problems))
         say(f"Waiting for CI on pull request #{n}", BOLD)
-        if subprocess.run(["gh", "pr", "checks", str(n), "--watch"], cwd=self.root).returncode:
+        if subprocess.run(["gh", "pr", "checks", str(n), "--watch"], cwd=self.tree).returncode:
             return self.epic_fail(rec, "needs-human", f"CI is red (or reported no checks) on pull request #{n}; "
                                   "fix it, then --epic-only --merge")
         merged = subprocess.run(["gh", "pr", "merge", str(n), f"--{self.cfg['mergeMethod']}",

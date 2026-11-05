@@ -9,7 +9,7 @@ MODELS = {
     "flash": "deepseek/deepseek-v4.1-flash",
     "flash-fast": "deepseek/deepseek-v4.1-flash-fast",
     "muse": "meta/muse-spark-1.3-contributor",
-    "luna": "gpt-6-luna",
+    "minimax": "minimax/minimax-m3.1-flash",
     "glm": "z-ai/glm-5.3-flash",
     "claude": "claude-sonnet-5-5",
 }
@@ -21,36 +21,47 @@ EFFORTS = {
     MODELS["flash"]: {"off", "low", "high", "max"},
     MODELS["flash-fast"]: {"off", "low", "high", "max"},
     MODELS["muse"]: {"low", "medium", "high", "xhigh"},
-    MODELS["luna"]: {"low", "medium", "high", "xhigh", "max"},
+    MODELS["minimax"]: {"low", "medium", "high", "xhigh", "max"},
     MODELS["glm"]: {"low", "high", "max"},
     CLAUDE_MODEL: {"low", "medium", "high", "xhigh", "max"},
 }
 WORKFLOWS = ("pocock", "osmani")
-# The agent CLI and account of a whole run (docs/adr/0002-*): CommandCode, or Claude Code billed to a
-# company Anthropic API key.
-BACKENDS = ("commandcode", "claude-api")
+# The agent CLI and account of a whole run: CommandCode, or Claude Code on the operator's subscription
+# (docs/adr/0004-*), or Codex on their ChatGPT subscription.
+BACKENDS = ("commandcode", "claude", "codex")
+# The company API key backend docs/adr/0002-* described: a saved epic can still name it.
+REMOVED_BACKEND = "claude-api"
+CODEX_MODELS = {"luna": "gpt-6-luna", "sol": "gpt-6.1-sol"}
+CODEX_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+EFFORTS.update({CODEX_MODELS["luna"]: CODEX_EFFORTS,
+                CODEX_MODELS["sol"]: CODEX_EFFORTS | {"ultra"}})
 CLAUDE_MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5", "haiku": "claude-haiku-5-5"}
 CLAUDE_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 EFFORTS.update({m: CLAUDE_EFFORTS for m in CLAUDE_MODELS.values()})
-# Per-stage spend caps (claude-api only), passed to that stage's sessions as --max-budget-usd.
-BUDGETS = {"implement": "IMPL_MAX_BUDGET_USD", "ticket review": "TICKET_REVIEW_MAX_BUDGET_USD",
-           "epic review": "EPIC_REVIEW_MAX_BUDGET_USD", "verify": "VERIFY_MAX_BUDGET_USD",
-           "launch plan": "LAUNCH_PLAN_MAX_BUDGET_USD"}
-# Sessions that spend another stage's budget: they run on that stage's model.
-BUDGET_OF = {"fix": "implement", "integration repair": "implement", "verify repair": "implement",
-             "repair review": "epic review"}
-KEYCHAIN_SERVICE = "krim-anthropic-api-key"
-# Removed from every Claude Code session's environment, so nothing but the company key can authenticate it.
-# CLAUDE_CODE_OAUTH_TOKEN is a subscription token that works from any config directory.
+# Removed from every Claude Code session's environment, so nothing but the operator's login can authenticate it.
+# CLAUDE_CONFIG_DIR is here too: the login belongs to the operator's normal config (docs/adr/0004-*).
 FOREIGN_AUTH = ("TICKET_RUNNER_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
                 "CLAUDE_CONFIG_DIR", "CCR_OAUTH_TOKEN_FILE", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
                 "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR")
-# The runner's Claude Code config directory (relative to the project root) and the settings seeded into it.
-CLAUDE_CONFIG_DIR = ".scratch/claude-config"
+# Passed inline to every session: no co-author attribution, no auto-memory carried from one session into the next.
 CLAUDE_SETTINGS = {"attribution": {"commit": "", "pr": ""}, "autoMemoryEnabled": False}
-# Claude Code reads these, so on claude-api an agent changing one changes what later sessions are told.
+# Claude Code reads these, so on claude an agent changing one changes what later sessions are told.
 CLAUDE_PROTECTED = ("CLAUDE.md", ".claude/", "CLAUDE.local.md",
                     ":(glob)**/CLAUDE.md", ":(glob)**/CLAUDE.local.md")
+CODEX_HOME_DIR = ".scratch/codex-home"
+CODEX_PROTECTED = (":(glob)**/AGENTS.md", "AGENTS.override.md", ":(glob)**/AGENTS.override.md", ".codex/", ".agents/")
+CODEX_CONFIG = '''model_provider = "openai"
+forced_login_method = "chatgpt"
+cli_auth_credentials_store = "file"
+notify = []
+[features]
+memories = false
+[memories]
+generate_memories = false
+use_memories = false
+[history]
+persistence = "none"
+'''
 # Osmani skills the runner names in its prompts. Each links ../../references/*.md, which the
 # skills installer leaves out; the preflight refuses to run while any of those files is missing.
 # Skills each stage's prompts name.
@@ -69,10 +80,19 @@ TICKET_WRITING_SKILLS = {"osmani": "planning-and-task-breakdown", "pocock": "to-
 EPIC_REVIEWERS = "deepseek,glm"
 # Each backend's (model, effort) per stage, keyed by the stage's argument prefix; used only where no flag or
 # env var names one. CommandCode's implementation effort follows its model (see cli.py).
-COMMANDCODE_DEFAULTS = {"": ("flash", None), "ticket_review_": ("luna,glm", "high"), "verify_": ("luna", "high"),
-                        "epic_review_": (EPIC_REVIEWERS, "high"), "launch_plan_": ("deepseek", "high")}
-CLAUDE_DEFAULTS = {"": ("sonnet", "medium"), "ticket_review_": ("opus", "medium"), "verify_": ("sonnet", "medium"),
-                   "epic_review_": ("opus", "high"), "launch_plan_": ("haiku", "low")}
+# The escalation model takes over a stuck ticket; "off" leaves it to a human (CommandCode by default, so a
+# run never starts spending on Claude unless asked).
+COMMANDCODE_DEFAULTS = {"": ("flash", None), "ticket_review_": ("minimax,glm", "high"), "verify_": ("minimax", "high"),
+                        "epic_review_": (EPIC_REVIEWERS, "high"), "launch_plan_": ("deepseek", "high"),
+                        "escalate_": ("off", "high")}
+# Sonnet on every ticket, Opus saved for the epic review and stuck tickets: the limit here is the plan's usage.
+CLAUDE_DEFAULTS = {"": ("sonnet", "medium"), "ticket_review_": ("sonnet", "high"), "verify_": ("sonnet", "medium"),
+                   "epic_review_": ("opus", "medium"), "launch_plan_": ("haiku", "low"), "escalate_": ("opus", "medium")}
+CODEX_DEFAULTS = {"": ("luna", "high"), "ticket_review_": ("luna", "high"), "verify_": ("luna", "high"),
+                  "epic_review_": ("sol", "high"), "launch_plan_": ("luna", "low"), "escalate_": ("sol", "medium")}
+BACKEND_DEFAULTS = {"commandcode": COMMANDCODE_DEFAULTS, "claude": CLAUDE_DEFAULTS, "codex": CODEX_DEFAULTS}
+BACKEND_MODELS = {"commandcode": MODELS, "claude": CLAUDE_MODELS, "codex": CODEX_MODELS}
+BACKEND_EFFORTS = {"commandcode": None, "claude": CLAUDE_EFFORTS, "codex": CODEX_EFFORTS}
 # Bumped whenever the shape of a saved epic review changes; an older record is reviewed again.
 REVIEW_PROTOCOL = 3
 FIX_LABEL = "epic-review-fix"
@@ -92,14 +112,13 @@ BROWSER_MCP = {"mcpServers": {BROWSER_SERVER: {"command": "npx",
 BROWSER_ADD = (f"command-code mcp add --scope user --transport stdio {BROWSER_SERVER} -- "
                "npx -y chrome-devtools-mcp@latest --isolated")
 OSMANI_SOURCE = "https://github.com/addyosmani/agent-skills.git"
-# budget-cap: the session spent its stage's budget, which says nothing about the ticket.
-RETRYABLE = {"turn-cap", "budget-cap", "provider-error", "interrupted", "in-progress", "error"}
+RETRYABLE = {"turn-cap", "provider-error", "interrupted", "in-progress", "error"}
 # Optional project config, relative to the project root. Every key is optional; these are the defaults.
 CONFIG = ".agents/ticket-runner.json"
 DEFAULTS = {"install": "npm ci", "lockfiles": ["package-lock.json"], "dependencyDirs": ["node_modules"],
             "linkFiles": [".env"], "gate": ["npx tsc --noEmit", "npm test"], "verify": [], "serve": None,
             "ready": None, "readyTimeout": 120, "serveEnv": None, "browser": False, "prBase": None,
-            "mergeMethod": "merge"}
+            "mergeMethod": "merge", "appVerification": None}
 MERGE_METHODS = ("merge", "squash", "rebase")
 # Copy-on-write clones keep each worktree's dependency directories isolated at near-zero cost.
 CLONES = (["cp", "-cR"], ["cp", "-R"]) if sys.platform == "darwin" else (["cp", "-R", "--reflink=auto"],)
@@ -126,8 +145,8 @@ TICKET_COLORS = tuple(f"38;5;{n}" for n in (213, 121, 141, 180, 159, 168, 147, 1
     if COLOR256 else ("34", "94", "93", "92", "95", "91", "97")
 # CommandCode's tool names, then Claude Code's.
 FILE_TOOLS = {"read_file", "edit_file", "write_file"}
-WRITE_TOOLS = {"edit_file", "write_file", "Edit", "Write", "MultiEdit", "NotebookEdit"}
-SHELL_TOOLS = {"shell_command", "Bash"}
+WRITE_TOOLS = {"edit_file", "write_file", "Edit", "Write", "MultiEdit", "NotebookEdit", "file_change"}
+SHELL_TOOLS = {"shell_command", "Bash", "command_execution"}
 PRINT = threading.Lock()
 
 

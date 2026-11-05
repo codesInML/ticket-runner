@@ -39,13 +39,48 @@ Remove zombie code (dead, unreachable or unused code) only inside files this tic
 leave it everywhere else, and the ticket reviewer records it as DEFERRED.
 Do not review your own work: a separate ticket reviewer reviews this ticket once you finish.
 Run typechecking, the ticket's focused tests, and the full suite once before finishing.
-Nobody can answer questions during this run. Decide and record anything that does not change what an
+{self.verification_rule()}Nobody can answer questions during this run. Decide and record anything that does not change what an
 acceptance criterion means (seams, naming, file placement, which existing pattern to follow): pick
 what the surrounding code does, and list each choice under an `## ASSUMPTIONS` heading in your final
 report. Stop instead (commit buildable work, state the question, end with STATUS=NEEDS_HUMAN) when the
 ticket contradicts the code or another ticket, when an acceptance criterion can be read two ways that
 lead to different behavior, or when meeting it would change a governed parameter or a public contract the
-ticket does not mention.
+ticket does not mention. Trouble running a check (tooling, a device, test data) is never one of these.
+"""
+
+    def verification_rule(self):
+        """Who runs a ticket's manual checks: the session itself, on the platform each check names."""
+        guide = self.cfg.get("appVerification")
+        how = f"{guide} says how to run the app, drive it and get test data; follow it. " if guide else ""
+        return f"""Run every check in the ticket's Verification section yourself, manual checks included, on the platform
+each one names: a check of a screen or flow runs in the running app, not only in its tests. {how}A missing
+simulator, fixture, login or test code is a problem to solve, not a reason to stop. In your final report,
+list each check under `## VERIFICATION`: where it ran, what you did, and what you saw.
+"""
+
+    def escalate_prompt(self, n, tdir, branch, base, kind, why, reports):
+        """A stronger model takes over a stuck ticket in its worktree, as an operator would ask it to."""
+        task = ("finish the ticket: meet every acceptance criterion and its Verification section" if kind == "implement"
+                else "fix every BLOCKING finding and UNMET acceptance criterion in the latest ticket review, and "
+                     "nothing it calls DEFERRED or REJECTED")
+        listed = "\n".join(f"  {path}" for path in reports)
+        debug = (f"Follow {self.skill_file('debugging-and-error-recovery')} for anything that fails for a reason you "
+                 "do not yet understand.\n") if self.osmani else ""
+        return f"""You are taking over issue #{n} of epic #{self.a.parent} because {why}.
+Earlier sessions left these reports; read them, but take none of their claims on trust:
+{listed}
+Read AGENTS.md and the ticket at {tdir / 'ticket.md'}. You are in its worktree on branch {branch}; the
+ticket's commits so far are {base}..HEAD. Your job is to {task}, then get the ticket over the line yourself.
+{self.domain()}{debug}Decide anything an engineer on this codebase would decide (seams, naming, which existing pattern to follow,
+how to get test data) and list each choice under `## ASSUMPTIONS` in your final report.
+{self.verification_rule()}Run typechecking, the focused tests, and the full suite once, then commit onto {branch} referencing #{n}.
+End STATUS=NEEDS_HUMAN only for a decision that belongs to a person: product behavior the ticket and its
+spec leave open, a contradiction between the ticket and the code or another ticket, or a change to a
+governed parameter or public contract the ticket does not mention. Name the decision and the options.
+Tooling, devices, test data, flaky checks and an earlier session's confusion are yours to resolve.
+Do not push, open PRs, change branches, rebase, merge, or add co-author trailers. Do not modify the
+runner, {self.hands_off}, agent configuration, hooks, or anything under {self.folder}.
+{self.agent_rule()}End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKED.
 """
 
     def repair_guidance(self, kind):
@@ -57,12 +92,21 @@ ticket does not mention.
         return (f"Follow {self.skill_file('debugging-and-error-recovery')}: reproduce, localize, fix, then guard "
                 "with a regression test, since nobody else will cover this interaction between tickets.\n")
 
-    def review_prompt(self, n, tdir, base, round_):
+    def review_prompt(self, n, tdir, base, round_, previous=None, fixed=None, since=None):
+        """A re-review (`round_` > 1) checks the previous findings and judges only the fix diff for new ones,
+        so each round cannot raise problems the code already had when the previous review read it."""
         s = self.skill_file
-        again = f"""This is the re-review after one fix round. Your earlier report is at
-{tdir / 'review' / 'round-1' / 'final.txt'} and the fix round's report at {tdir / 'fix' / 'final.txt'}.
-Confirm every BLOCKING finding there is fixed and raise anything the fix broke; no fix round follows.
-""" if round_ > 1 else ""
+        previous = previous or tdir / "review" / f"round-{round_ - 1}" / "final.txt"
+        fix = ("the fix is a person's commits, with no report" if fixed == "" else
+               f"the fix round's report is at {fixed or tdir / 'fix' / 'final.txt'}")
+        scope = (f"""New BLOCKING findings must come from the fix itself: git diff {since}..HEAD. A problem in code that
+diff leaves untouched was there when the previous review read it, so it goes under DEFERRED, unless it
+leaves an acceptance criterion UNMET.
+""") if since else ""
+        again = f"""This is the re-review after one fix round. The previous review is at
+{previous}, and {fix}.
+Confirm every BLOCKING finding there is fixed and raise anything the fix broke.
+{scope}""" if round_ > 1 else ""
         return f"""You are the ticket reviewer for issue #{n} of epic #{self.a.parent}. Someone else wrote this
 code; review it with fresh eyes and take none of their claims on trust.
 Read AGENTS.md and the ticket at {tdir / 'ticket.md'}, then follow {s('code-review-and-quality')}
@@ -88,6 +132,8 @@ Read-only review: do not edit files, commit, change branches, push, or post comm
         cfg, s = self.cfg, self.skill_file
         browser = (f"Follow {s(BROWSER_SKILL)} for anything that renders in a browser; the {BROWSER_SERVER} "
                    "MCP tools are enabled for you.\n") if cfg["browser"] else ""
+        if cfg["appVerification"]:
+            browser += f"{cfg['appVerification']} says how to run checks in the app itself (devices, test data); follow it.\n"
         return f"""You are the verifier for epic #{self.a.parent}. The epic's code is checked out in this worktree
 ({wt}), and the app is running: the runner started it with `{cfg['serve']}`, and `{cfg['ready']}` succeeds.
 Read AGENTS.md, then exercise every check in {self.checks_file()} against the running app: each ticket's
@@ -104,7 +150,7 @@ Read-only: do not edit files, commit, change branches, push, or post comments; s
 
     def agent_rule(self, work="agent work"):
         """Which agent CLI a session may use for sub-agents: its own backend, never another."""
-        if self.claude:
+        if self.backend.name != "commandcode":
             return (f"Use only your own tools and sub-agents for {work}; do not invoke the codex, claude or "
                     "command-code CLIs.\n")
         return f"Use only CommandCode for {work}; do not invoke codex or claude CLIs.\n"
@@ -138,6 +184,8 @@ only when the epic touches auth, untrusted input or personal or sensitive data, 
 BLOCKING is a real correctness or security defect in this epic, a broken integration between tickets, or
 an UNMET requirement or checkpoint. DEFERRED is a real defect the epic does not own: pre-existing code, or
 out of the epic's scope. Style and taste are not findings. Write "None." when there are none.
+After this review says SHIP the runner closes the sub-issues and opens the pull request, and a person
+reviews and merges it, so open sub-issues, a missing pull request or a pending human review are never findings.
 Put nothing else under FINDINGS: any summary belongs in the sections above.
 {self.read_only}End with exactly one line: VERDICT=SHIP when nothing is BLOCKING, otherwise VERDICT=FIX-FIRST.
 """
@@ -208,10 +256,27 @@ Review only the fix diff: git diff {rv['start']}..{rv['fixHead']} and git log {r
 far is at {self.folder / 'review' / 'report.md'}.
 ## FIXES: each of these confirmed findings exactly once: - {targets[0]} FIXED <evidence>, or - {targets[0]} NOT FIXED <evidence>.
 IDs: {', '.join(targets)}
+The steps that follow SHIP (closing the sub-issues, opening, reviewing and merging the pull request) never make a
+finding NOT FIXED.
 ## FINDINGS: only problems the fix diff itself introduced, numbered on from {r['letter']}{max(used, default=0) + 1}, in the
 same shape as before: BLOCKING for a defect the fixes caused, DEFERRED for anything else you notice.
 Anything outside the fix diff is out of scope. Write "None." when there are none.
 {self.read_only}End with exactly one line: FOLLOW-UP=DONE
+"""
+
+    def epic_repair_prompt(self, rv, r, targets):
+        used = [int(i[1:]) for i in rv["findings"] if i[0] == r["letter"]]
+        listed = "\n".join(f"  {i}: {rv['findings'][i]['text']}" for i in targets)
+        return f"""Repair review for epic #{self.a.parent}. The epic review stayed blocked after its fix tickets, and a person then
+committed fixes on the epic branch. Review only their commits: git diff {rv['fixHead']}..HEAD and git log
+{rv['fixHead']}..HEAD. The epic review so far is at {self.folder / 'review' / 'report.md'}.
+## FIXES: each of these blocking findings exactly once: - {targets[0]} FIXED <evidence>, or - {targets[0]} NOT FIXED <evidence>.
+IDs: {', '.join(targets)}
+{listed}
+## FINDINGS: only problems these commits themselves introduced, numbered on from {r['letter']}{max(used, default=0) + 1}, in
+the same shape as before: BLOCKING for a defect the commits caused, DEFERRED for anything else you notice. Code
+these commits did not change is out of scope, however long it has been there. Write "None." when there are none.
+{self.read_only}End with exactly one line: REPAIR=DONE
 """
 
     def repair_review_prompt(self, wt, tip, vdir):

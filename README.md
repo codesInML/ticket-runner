@@ -1,54 +1,183 @@
 # Ticket runner
 
 Run `bin/ticket-runner --help` for workflow, configuration, and resume options.
-`bin/ticket-runner-osmani` selects the Osmani workflow, and `bin/ticket-runner-claude` the
-claude-api backend; the two compose (`ticket-runner-claude 207 --workflow osmani`). Every
-command uses the `ticket_runner.py` entry point and requires the adjacent `ticket_runner_lib`
-package.
+
+## Branches and the epic worktree
+
+`ticket-runner 207 --branch feat/payments` merges #207's tickets into `feat/payments`, whatever you have checked
+out. `--branch` is required on an epic's first run and saved with it, so later runs need only
+`ticket-runner 207 --resume`; naming a different branch later is refused.
+
+A branch that does not exist starts from the latest pull request target on origin, or from `--from <branch>`. One
+that exists is used as it stands, and `--from` is refused; one only on origin gets a local copy, and one behind origin
+fast-forwards. A local copy and an origin copy that have both moved on stop the run.
+
+The pull request target is the first of `--pr-base`, `--from`, the config's `prBase`, and origin's default branch. It
+is saved with the epic, and a later `--pr-base` naming another is refused.
+
+| Command | Tickets merge into | Pull request goes to |
+| --- | --- | --- |
+| `--branch feat/payments` | `feat/payments` | `main` |
+| `--branch feat/refunds --from feat/payments` | `feat/refunds` | `feat/payments` |
+| `--branch feat/payments --pr-base develop` | `feat/payments` | `develop` |
+
+Each epic runs in its own worktree at `.scratch/epics/<parent>`, so the folder you ran the command from is never
+touched and several epics can run at once from it, each with its own lock and `--jobs` count. Commit epic-level fixes
+in that worktree: git allows a branch to be checked out in only one place. The worktree is deleted when a run
+succeeds, which frees the branch for you to check out; every commit stays on the branch, and a later run recreates it.
+It stays while the run is waiting, after a failure or Ctrl-C, after `--only`, and while it holds uncommitted changes.
+
+The project config is read from the epic branch when committed there, otherwise from your folder. Link files, dependency
+directories and `serveEnv` come from your folder.
+
+An epic part-way through from before epic worktrees still has its branch checked out in your folder. `--resume` asks
+you to switch that folder to another branch once, then carries on; finished tickets, ticket worktrees and saved sessions
+stay valid. A runner of that older version in the same checkout makes this one refuse to start, and the other way round.
+
+## Unblocking
+
+A ticket that ends `needs-human` or `awaiting-human` gets the `needs-human` label, and the run stays alive. Fix it in
+its worktree (commit, finish any rebase), or answer on the issue, then remove the label: within about 30 seconds the
+run continues that ticket as `--resume` would. Other tickets keep running meanwhile, its dependents stay held, and
+a ticket that gets stuck again gets the label back. Closing the issue by hand also ends the wait.
+
+The epic works the same way. When an epic stage ends `needs-human`, fix it (in the epic worktree, or the kept verify
+worktree), then remove the label from the epic issue to run the stages again.
+
+The run waits with no time limit and repeats what is waiting every 30 minutes. It exits once no ticket is running or
+waiting and nothing further can start. Other endings such as `turn-cap` and `error` do not wait, and need `--resume`.
+A usage limit or a signed-out login still stops the whole run. Ctrl-C while waiting is safe.
+
+The label decides on restarts too: `--resume` continues a ticket whose label is gone, even if you removed it while
+nothing was running, and waits on one that still has it. `--resume --only <n>` continues a ticket regardless, and
+`--epic-only --force` runs the epic stages regardless. A label only counts as removed once the run has seen it on
+GitHub, and an issue it cannot read counts as still blocked, so a failed update can never look like an unblock. A ticket
+stuck before this existed gets its label on the first sync and then waits, even if you had already cleared it by hand.
+
+## GitHub sync
+
+Labels, closing tickets after SHIP, the findings and cost comments, and fix ticket links all go through one sync step,
+about every 30 seconds and at startup. It compares what the saved state says GitHub should show with what GitHub last
+confirmed, so only the current status is ever sent, a restart needs nothing special, and removing a label is never
+undone. Network failures and GitHub outages keep retrying while work carries on; a real error such as a lost permission
+is reported once and tried again next run. A run that ends tries for about 2 minutes more, lists anything still
+unsent, and the next run of that epic sends it. Nothing syncs while no run is active.
+
+A label missing from the repo is created, in a fixed colour, when it is being added, and dropped from the command when
+it is being removed. A label that exists keeps its own colour and description.
+
+## Escalation and self-verification
+
+A ticket is stuck when its implementer ends NEEDS_HUMAN, BLOCKED or without a STATUS line, when its fix
+round does, or when its ticket review still blocks after the fix round. Before it goes to a person, the
+runner hands it once per kind (implement, review) to the escalation model (`--escalate-model`, env
+`ESCALATE_MODEL`, default `sol` @ medium on codex and `opus` @ medium on claude, `off` on commandcode). That
+session runs in a fresh thread in the ticket's worktree with the earlier reports. It is told to fix the
+problem, run the checks itself, and stop only for a decision that belongs to a person. A review escalation
+is followed by one more review round with the same reviewer; a ticket still blocking after that needs a
+human. Every re-review confirms the previous findings and draws new BLOCKING findings only from the
+fix diff (since the commit the previous review read); older problems it notices are DEFERRED unless they
+leave a criterion UNMET. After a person fixes a needs-human ticket in its worktree and unblocks it, the next review reads
+their commits against the last review the same way. An escalation that ends NEEDS_HUMAN waits on the issue (`awaiting-human`) as before, and an
+interrupted one resumes its own thread with `--resume`.
+
+Every implement, fix and escalation prompt tells the session to run the ticket's Verification checks
+itself, manual checks included, on the platform each one names. It also tells the session to report them
+under `## VERIFICATION`. Set `appVerification` in `.agents/ticket-runner.json` to a doc saying how to run
+the app (devices, scripts, test data) and every working prompt, and the verifier, points at it. The doc is
+protected like the config, and ticket worktrees see it only if it is committed or listed in `linkFiles`.
+`bin/ticket-runner` is the only command. `--backend` and `--workflow` (or `BACKEND` and `WORKFLOW`)
+choose the agent CLI and skill set, are required on an epic's first run, and are saved with the epic,
+so later runs need neither. The command uses the `ticket_runner.py` entry point and requires the
+adjacent `ticket_runner_lib` package.
 
 ## Backends
 
 A backend is the agent CLI and account of every session in a run (`--backend`, env `BACKEND`):
 
-- `commandcode` (default): the `command-code` CLI (`COMMANDCODE_BIN`) and its models.
-- `claude-api`: Claude Code (`CLAUDE_BIN`, default `claude`) on a config directory of the runner's
-  own (`.scratch/claude-config`), billed to the company Anthropic API key and never to a personal
-  subscription. See `docs/adr/0002-*` for why.
+- `commandcode`: the `command-code` CLI (`COMMANDCODE_BIN`) and its models. Ticket reviews alternate
+  over `minimax` (`minimax/minimax-m3.1-flash`) and `glm`, and `minimax` runs the verifier. Luna is
+  refused on this backend, by alias or full ID, from any flag or variable; a ticket's saved Luna
+  review moves to its current reviewer on its next round.
+- `claude`: Claude Code (`CLAUDE_BIN`, default `claude`) on the operator's normal login and
+  subscription. See `docs/adr/0004-*` for why.
+- `codex`: the Codex CLI (`CODEX_BIN`, default `codex`) billed to the operator's ChatGPT subscription.
 
-The key comes from `TICKET_RUNNER_ANTHROPIC_API_KEY`, else the macOS Keychain item
-`krim-anthropic-api-key` (`TICKET_RUNNER_KEYCHAIN_SERVICE` names another). Store it once with
-`security add-generic-password -s krim-anthropic-api-key -a "$USER" -w`. Without a key the run,
-and its `--dry-run`, refuse. The key is read once and set only in each Claude Code session's
-environment, with every other Anthropic credential and provider switch removed; the runner's own
-gate, verify and install commands never see it, and it is never logged or saved. The config
-directory holds no login, so a session without the key fails rather than reaching a subscription,
-and a session whose init reports any `apiKeySource` but the key stops the run before its first API
-call. Only the runner-owned user settings load (`--setting-sources user`); project settings cannot
-replace the key, endpoint or provider. Project CLAUDE.md discovery and normal tools remain available.
-The directory links your skills (`AGENT_SKILLS_DIR`) and turns off commit attribution and
-auto-memory.
+### Codex on a ChatGPT subscription
 
-On claude-api the stages default to `sonnet` (implement, fix and repair sessions, verifier, at
-`medium`), `opus` (one epic reviewer that re-checks its own findings, at `high`; the osmani ticket
-review, at `medium`) and `haiku` (launch plan, at `low`). Every stage model must be a Claude model
-(`sonnet`, `opus`, `haiku` or a full `claude-*` ID), checked before anything is spent. CLAUDE.md and CLAUDE.local.md at every project depth
-and `.claude/` join the protected paths, since Claude Code reads them. The backend is saved with
-the epic: switching it is refused while a ticket is part-way through, and a run that does not name
-a backend refuses to move a saved epic off its own.
+Run `codex login` first. Preflight, including `--dry-run`, refuses unless the operator's
+`$CODEX_HOME/auth.json` (default `~/.codex/auth.json`) reports `auth_mode: "chatgpt"`, the binary exists,
+and every stage names a `gpt-*` model. No API key is used. Before spawning children the runner removes
+inherited `OPENAI_*` and `CODEX_*` variables; only sessions receive the runner-owned `CODEX_HOME` at
+`<project root>/.scratch/codex-home`. Gates, installs and GitHub commands receive none of them.
 
-Each Claude Code session's cost, tokens, turns and time are recorded per attempt in `state.json`
-(a resumed session's earlier spend is subtracted, as Claude Code reports session totals). An append-only
-epic cost ledger preserves spending when a review or launch plan is replaced; older state migrates its
-remaining costs once. The
-ticket graph shows the epic's running total and the run ends with a table by stage and ticket;
-`--post-costs` also puts each ticket's cost in its done comment and the table on the epic issue.
-`IMPL_MAX_BUDGET_USD`, `TICKET_REVIEW_MAX_BUDGET_USD`, `EPIC_REVIEW_MAX_BUDGET_USD`,
-`VERIFY_MAX_BUDGET_USD` and `LAUNCH_PLAN_MAX_BUDGET_USD` cap each session of their stage; a session
-that reaches its cap ends `budget-cap`, which `--resume` continues with a fresh budget.
+The runner writes its own config, with memories and prompt history off, no notifications or configured
+MCP servers, and no inherited model or effort. Its `auth.json` is a symlink to the operator's file so
+rotating refresh tokens stay shared. A regular file at that destination is refused. Skills load from
+`~/.agents/skills`; an explicit `AGENT_SKILLS_DIR` is linked into the runner home. Session transcripts
+remain there for `--resume`. Browser verification receives Chrome DevTools configuration inline.
 
-An account failure (credit balance too low, a revoked key, a spend limit) stops every ticket at
-once; top up or fix the key, then `--resume`. Rate limits and overloads end only the session, as
-`provider-error`.
+| Stage | Default model | Effort |
+| --- | --- | --- |
+| Implement, fix, integration repair, verify repair | `gpt-6-luna` | high |
+| Ticket review (osmani) | `gpt-6-luna` | high |
+| Epic review, repair review | `gpt-6.1-sol` | high |
+| Verify | `gpt-6-luna` | high |
+| Launch plan | `gpt-6-luna` | low |
+| Escalate (a stuck ticket) | `gpt-6.1-sol` | medium |
+
+Aliases `luna` and `sol`, or full `gpt-*` IDs, work for every stage; flags and environment variables
+override defaults. Luna accepts low/medium/high/xhigh/max; Sol also accepts ultra. The epic review has
+one reviewer that re-checks its own findings. The default ticket review intentionally shares the
+implementer's model in a fresh session; the yellow warning keeps those shared blind spots visible.
+
+The runner counts completed tool items and terminates the process group at the stage's turn cap.
+The resulting `turn-cap` is retryable: `--resume` continues the same thread with a fresh count.
+A ChatGPT usage limit stops every ticket and reports the reset time when available; wait for access,
+then `--resume`. Signed-out or expired/revoked logins stop the run with `codex login`, then `--resume`.
+Request rate limits, overloads and server errors leave only that session retryable as `provider-error`.
+
+Costs are tokens and time only, with no dollar amount in state, the graph or the tables posted with
+`--post-costs`. Budget variables ending in `_MAX_BUDGET_USD` are ignored. Input, cached input and output
+tokens are saved; displayed totals add input and output (cached input is already included in input).
+Resumed thread totals subtract usage already recorded. `AGENTS.md` and `AGENTS.override.md` at every
+depth, `.codex/` and `.agents/` join the protected paths: main-worktree changes stop the run, and ticket
+diffs touching them never integrate. Saved-backend rules also apply to codex. See `docs/adr/0003-*`.
+
+### Claude Code on a subscription
+
+Run `claude auth login` first. Preflight, including `--dry-run`, runs `claude auth status` as a session
+would and refuses unless it reports `loggedIn` with `authMethod: "claude.ai"`, the binary exists, and
+every stage names a Claude model (`sonnet`, `opus`, `haiku` or a full `claude-*` ID). No API key is used.
+Each session's environment has every inherited Anthropic credential, token handoff, provider switch and
+`CLAUDE_CONFIG_DIR` removed, and a session whose init reports any `apiKeySource` but `none`, or another
+API provider, stops the run before its first API call.
+
+Sessions run on the operator's own `~/.claude`, because the login lives in the macOS Keychain, tied to
+that config directory. They read the global `CLAUDE.md` and skills and appear in the operator's history.
+Only user settings load (`--setting-sources user`), so project settings cannot replace the account or
+endpoint. `--strict-mcp-config` leaves out configured MCP servers, the verifier's browser server is passed
+inline, and inline settings turn off commit attribution and auto-memory. CLAUDE.md and CLAUDE.local.md at
+every project depth and `.claude/` join the protected paths, since Claude Code reads them.
+
+| Stage | Default model | Effort |
+| --- | --- | --- |
+| Implement, fix, integration repair, verify repair | `sonnet` | medium |
+| Ticket review (osmani) | `sonnet` | high |
+| Epic review, repair review | `opus` | medium |
+| Verify | `sonnet` | medium |
+| Launch plan | `haiku` | low |
+| Escalate (a stuck ticket) | `opus` | medium |
+
+Costs are tokens and time, with no dollar amount in state, the graph or the tables posted with
+`--post-costs`, and a resumed session's earlier usage is subtracted. A spent usage limit stops every ticket
+and reports the reset time when the session gave one; wait for it, then `--resume`. A signed-out or expired
+login stops the run with `claude auth login`, then `--resume`. Other rate limits and overloads end only
+the session, as `provider-error`.
+
+An epic saved on the removed `claude-api` backend continues only once `--backend` names its new one, since
+its account changes. Its part-way tickets start fresh sessions in their kept worktrees, as the old config
+directory's sessions cannot be resumed.
 
 ## Code layout
 
@@ -65,6 +194,8 @@ once; top up or fix the key, then `--resume`. Rate limits and overloads end only
   review, and closing sub-tickets.
 - `verification.py`: command and runtime checks, repairs, and reports.
 - `shipping.py`: launch plans, pushes, pull requests, and CI-gated merges.
+- `sync.py`: keeping GitHub in step with saved state, and watching for an unblock.
+- `epic_branch.py`: setting up the epic branch before a run starts.
 - `config.py`, `github.py`, and `graph.py`: configuration validation, issue
   discovery, and dependency graph operations.
 - `settings.py`, `display.py`, `processes.py`, and `text.py`: defaults and shared
@@ -78,14 +209,19 @@ modules do not import the workflow classes.
 ## Tests
 
 Run `python3 -m unittest discover -s tests -q`. The integration suite uses
-temporary git repositories and fake GitHub, CommandCode, Claude Code and keychain executables. Runtime
+temporary git repositories and fake GitHub, CommandCode, Claude Code and Codex executables. Runtime
 verification tests also start a temporary server on localhost.
 
 ## Integration and recovery guarantees
 
-The runner holds one checkout lock before reading saved state or discovering issues.
-Every ticket runs the configured gate before integration, including tickets whose
-base has not moved. Gates and verification commands must leave tracked code and
+The runner holds one lock per epic before reading saved state or discovering issues.
+Every ticket with commits runs the configured gate before integration, including tickets
+whose base has not moved. A ticket that ends STATUS=COMPLETE with no commits and a clean
+worktree has nothing to integrate: it is done at once, without a ticket review or gate,
+and its worktree and branch are removed as after a merge. An implement session whose
+final report lacks the STATUS line is resumed once and asked for only that line; a
+second miss needs a human. A ticket review that ends without its VERDICT line, and an
+epic reviewer or ticket writer whose report lacks its end line, get the same single nudge. Gates and verification commands must leave tracked code and
 HEAD unchanged; new unignored files created by verification commands are kept for
 inspection and require a human. Ignore intentional build artifacts in the project.
 Runtime artifacts already present when the verifier starts may remain untracked in
@@ -123,7 +259,12 @@ cross-examination or self-check must answer each ID it is given exactly once; th
 not a model, decides which findings are confirmed, disputed or withdrawn. Only confirmed
 blocking findings become fix tickets, and only the runner files them, with a marker in each
 body so a retry finds an issue it already filed instead of filing it twice. One follow-up
-review reads only the fix diff; anything still blocking needs a human. A verify repair after
-SHIP gets a repair review, and `--merge` accepts a head only through that chain. See
+review reads only the fix diff; anything still blocking needs a human. When that person commits
+fixes on the epic branch and unblocks the epic, the next run of the stages gives their commits (since the fix tickets) a repair review by
+the last reviewer instead of a fresh review of the whole epic: each open finding FIXED or NOT FIXED,
+plus anything those commits broke. It repeats for each later commit until it says SHIP, and only a
+branch that no longer contains the fix tickets, or changed requirements or reviewers, start over. A
+verify repair after SHIP gets a repair review too, and `--merge` accepts a head only through that
+chain. See
 `CONTEXT.md` for the vocabulary and `docs/adr/0001-*` for why.
 

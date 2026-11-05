@@ -10,6 +10,18 @@ The parent GitHub issue and the branch its tickets integrate into; the unit the 
 ships.
 _Avoid_: Spec (for the branch), feature
 
+**Epic branch**:
+The branch an epic's tickets integrate into, named once and saved with the epic.
+_Avoid_: Active branch, merge target
+
+**Epic worktree**:
+The epic branch's own working copy for the life of a run, apart from the operator's folder.
+_Avoid_: Main worktree (for this copy)
+
+**PR target**:
+The branch an epic's pull request goes to, saved with the epic.
+_Avoid_: Base branch, merge target
+
 **Ticket**:
 A sub-issue of the epic that one agent implements in its own worktree and the runner integrates into the
 epic branch.
@@ -24,9 +36,19 @@ _Avoid_: Repair ticket, follow-up ticket
 The skill set an epic's prompts follow: pocock or osmani.
 
 **Backend**:
-The agent CLI and account every session of a run uses: commandcode, or claude-api (Claude Code billed to a
-company Anthropic API key).
+The agent CLI and account every session of a run uses: commandcode, claude (Claude Code on the operator's
+subscription), or codex (the Codex CLI on the operator's ChatGPT subscription).
 _Avoid_: Engine, harness, provider
+
+## Waiting on a person
+
+**Unblock**:
+A person removing `needs-human` from a ticket or epic issue, which the waiting run takes as its cue to continue that issue.
+_Avoid_: Resume (the operator restarting a run), retry
+
+**Sync**:
+The run comparing what its saved state says GitHub should show with what GitHub last confirmed, and sending the difference.
+_Avoid_: Retry queue, outbox
 
 ## Stages
 
@@ -36,7 +58,8 @@ _Avoid_: Final stages, post-ticket stages
 
 **Ticket review**:
 A read-only review of one ticket's diff by a different model family, before it integrates (osmani only). On
-the claude-api backend it is a different model of the same family.
+the claude and codex backends it is, by default, the implementer's own model in a fresh session that never
+saw the implementation.
 
 **Epic review**:
 The review of the whole epic diff by one or two reviewers, ending in SHIP or in fix tickets.
@@ -60,8 +83,9 @@ The stage that runs the project's verify commands and runtime checks against the
 The single agent that fixes a failed verify in the verify worktree.
 
 **Repair review**:
-A one-reviewer review of only the verify repair's diff, extending the epic review's SHIP to the repaired
-head.
+A one-reviewer review of only a repair's diff: the verify repair's, extending the epic review's SHIP to
+the repaired head, or a person's commits on the epic branch after the epic review blocked, which marks
+each open finding fixed or not and ships when nothing still blocks. It never re-reviews the whole epic.
 
 **Launch plan**:
 The runner-pasted section of the pull request covering the pre-launch checklist, risk and rollback.

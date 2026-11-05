@@ -97,9 +97,15 @@ class Verification:
     def verify_branch(self):
         return f"cc/{self.a.parent}/verify"
 
+    def verify_path(self, rec):
+        """One verify worktree per epic, so epics can run at once; a kept one from before that stays where it is."""
+        legacy = self.worktrees / "verify"
+        return legacy if rec.get("worktree") == str(legacy) and legacy.exists() else \
+            self.worktrees / f"verify-{self.a.parent}"
+
     def verify_worktree(self, rec, tip):
         """The verify worktree at the epic tip; a kept one (after needs-human) is reused with its fixes."""
-        branch, wt = self.verify_branch(), self.worktrees / "verify"
+        branch, wt = self.verify_branch(), self.verify_path(rec)
         created = not wt.exists()
         if created:
             self.worktrees.mkdir(parents=True, exist_ok=True)
@@ -116,7 +122,7 @@ class Verification:
                            f"{', '.join(sorted(unexpected))}; commit or remove them, then --epic-only")
             return None
         self.update(rec, drop=("unexpectedUntracked",))
-        resuming = self.a.resume and rec.get("phase") == "repair" and \
+        resuming = self.resuming and rec.get("phase") == "repair" and \
             rec.get("repair", {}).get("status") in RETRYABLE
         problem = (f"{os.path.relpath(wt)} is mid-rebase" if rebasing(wt) else
                    f"{os.path.relpath(wt)} has uncommitted changes" if edited(wt) and not resuming else
@@ -190,7 +196,7 @@ class Verification:
                 time.sleep(min(1, max(0, deadline - time.monotonic())))
             say("verify: the app is ready; running the verifier", BOLD)
             check, head = rec.setdefault("check", {}), git(wt, "rev-parse", "HEAD")
-            session = check.get("sessionId") if self.a.resume and check.get("status") in RETRYABLE \
+            session = check.get("sessionId") if self.resuming and check.get("status") in RETRYABLE \
                 and check.get("head") == head else None
             self.update(rec, phase="check")
             self.update(check, drop=() if session else ("sessionId",))
@@ -269,7 +275,7 @@ class Verification:
     def verify_repair(self, rec, wt, vdir):
         """One repair agent on the implementer model, in the verify worktree."""
         branch, rep = self.verify_branch(), rec.setdefault("repair", {})
-        session = rep.get("sessionId") if self.a.resume and rep.get("status") in RETRYABLE else None
+        session = rep.get("sessionId") if self.resuming and rep.get("status") in RETRYABLE else None
         failing = []
         for r in rec.get("commands", []):
             if r["rc"]:
@@ -327,7 +333,7 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
             self.accept_repair(head, tip)
             return True
         model = a.epic_review_models[-1]
-        session = rr.get("sessionId") if a.resume and rr.get("status") in RETRYABLE and rr.get("head") == head \
+        session = rr.get("sessionId") if self.resuming and rr.get("status") in RETRYABLE and rr.get("head") == head \
             else None
         self.update(rr, base=tip, head=head, status="in-progress", drop=() if session else ("sessionId",))
         say(f"\n━━ Repair review of {tip[:8]}..{head[:8]} with {model} ━━", BOLD, BLUE)
@@ -381,17 +387,17 @@ End with exactly one line: STATUS=COMPLETE, STATUS=NEEDS_HUMAN, or STATUS=BLOCKE
                                       f"{os.path.relpath(wt)}, then --epic-only")
             with self.integration:
                 self.check_main()
-                git(self.root, "merge", "-q", "--ff-only", branch)
+                git(self.tree, "merge", "-q", "--ff-only", branch)
                 self.guard()
             say(f"Verified fixes merged into {self.epic} (now {head[:8]})", GREEN, BOLD)
-            if self.lock_changed(self.root, tip, head):
-                say(f"a lockfile changed; running {self.install_cmd} in the main worktree", BOLD)
-                if subprocess.run(self.install_cmd, shell=True, cwd=self.root).returncode:
-                    raise Fatal(f"{self.install_cmd} failed in the main worktree after the verify repair")
+            if self.lock_changed(self.tree, tip, head):
+                say(f"a lockfile changed; running {self.install_cmd} in {os.path.relpath(self.tree)}", BOLD)
+                if subprocess.run(self.install_cmd, shell=True, cwd=self.tree).returncode:
+                    raise Fatal(f"{self.install_cmd} failed in {os.path.relpath(self.tree)} after the verify repair")
         self.update(rec, status="pass", head=head, fingerprint=self.verify_fingerprint(head), ran=True, phase=None, drop=("reason",))
         try:
             git(self.root, "worktree", "remove", "--force", str(wt))
-            git(self.root, "branch", "-q", "-d", branch)
+            git(self.tree, "branch", "-q", "-d", branch)
         except subprocess.CalledProcessError as exc:
             say(f"Verify passed, but removing {os.path.relpath(wt)} failed ({exc}); remove it by hand", YELLOW)
         return 0

@@ -48,12 +48,15 @@ def load_config(root):
              "serveEnv": (lambda v: v is None or relative(v), "a relative path or null"),
              "browser": (lambda v: type(v) is bool, "true or false"),
              "prBase": (lambda v: v is None or text(v), "a branch name or null"),
-             "mergeMethod": (lambda v: v in MERGE_METHODS, f"one of {', '.join(MERGE_METHODS)}")}
+             "mergeMethod": (lambda v: v in MERGE_METHODS, f"one of {', '.join(MERGE_METHODS)}"),
+             "appVerification": (lambda v: v is None or relative(v), "a relative path or null")}
     problems = [f"{key} must be {what}" for key, (ok, what) in rules.items() if not ok(cfg[key])]
     if not problems and cfg["serve"] and not cfg["ready"]:
         problems.append("serve needs a ready command to poll")
     if not problems and cfg["browser"] and not cfg["serve"]:
         problems.append("browser needs serve: the verifier can only browse a running app")
+    if not problems and cfg["appVerification"] and not (root / cfg["appVerification"]).is_file():
+        problems.append(f"appVerification {cfg['appVerification']} does not exist")
     if problems:
         raise RuntimeError(f"{CONFIG}: " + "; ".join(problems))
     return cfg
@@ -126,6 +129,9 @@ def plan_stages(a, cfg, data, open_tickets, head):
         rec = data.get(key, {})
         return rec.get("head") == head and rec.get("status") in ok
     lines = [paint("Stages:", BOLD)]
+    branch = a.branch or data.get("_meta", {}).get("branch")
+    if branch:
+        lines.append(f"  epic branch  {branch}, in its own worktree at .scratch/epics/{a.parent}")
     if a.epic_only:
         lines.append("  tickets      skipped (--epic-only)")
     else:
@@ -153,10 +159,12 @@ def plan_stages(a, cfg, data, open_tickets, head):
         lines.append("  ship         skipped (--no-ship)")
     else:
         merge = f"; then --merge ({cfg['mergeMethod']}) once CI is green" if a.merge else ""
-        into = cfg["prBase"] or "origin's default branch"
+        into = a.pr_base or data.get("_meta", {}).get("prBase") or a.from_branch or cfg["prBase"] \
+            or "origin's default branch"
         lines.append("  ship         " + (f"pull request already open at {head[:8]}" if held("_ship", ("pr-open", "merged"))
                                           else f"launch plan ({a.launch_plan_model}), push, pull request into {into}")
                      + merge + " (only on a SHIP verdict)")
+    lines.append("A ticket or the epic that needs a person waits; removing needs-human from its issue continues it.")
     return "\n".join(lines)
 
 
@@ -173,7 +181,7 @@ def stage_refusals(a, cfg, root):
         refusals.append(f"serveEnv {env} does not exist; create it, or remove serve from {CONFIG}")
     elif (root / ".env").exists() and (root / env).resolve() == (root / ".env").resolve():
         refusals.append("serveEnv must not be the developer's .env; give the app its own env file")
-    if cfg["browser"] and getattr(a, "backend", "commandcode") == "commandcode":  # claude-api passes it inline
+    if cfg["browser"] and getattr(a, "backend", "commandcode") == "commandcode":  # claude and codex pass it inline
         listed = subprocess.run([os.getenv("COMMANDCODE_BIN", "command-code"), "mcp", "list"],
                                 capture_output=True, text=True)
         if not re.search(rf"(?<![\w-]){BROWSER_SERVER}(?![\w-])", listed.stdout + listed.stderr):

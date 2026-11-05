@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Parallel GitHub ticket runner on CommandCode. See --help.
+# Parallel GitHub ticket runner. See --help.
 set -euo pipefail
 src="${BASH_SOURCE[0]}"
 while [ -L "$src" ]; do
