@@ -73,6 +73,16 @@ class ReviewInputTests(unittest.TestCase):
             with self.subTest(report=report):
                 self.assertIsNotNone(review_rows(report, ('CONFIRMED',))[1])
 
+    def test_parser_accepts_a_verdict_qualified_after_a_comma_or_semicolon(self):
+        for report in ('- D3 CONFIRMED, with one detail corrected — `a.ts:26` consumes it',
+                       '- D3 CONFIRMED; in part — `a.ts:26` consumes it'):
+            with self.subTest(report=report):
+                entries, problem = review_rows(report, ('CONFIRMED', 'DISPUTED'))
+                self.assertIsNone(problem)
+                self.assertEqual(['D3', 'CONFIRMED'], entries[0][:2])
+                self.assertIn('a.ts:26', entries[0][2])
+        self.assertIsNotNone(review_rows('- D3 CONFIRMED,', ('CONFIRMED',))[1])
+
     def test_parser_skips_closing_prose_but_not_malformed_entries(self):
         report = ('- D1 DEFERRED a.ts:1 — wrong — evidence\n\n'
                   'Per instructions, formatting-only deviations are not findings. No BLOCKING defects found.')

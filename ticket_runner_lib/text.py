@@ -37,7 +37,7 @@ def nested_sections(body, name):
 def rows(body, verbs):
     """`- D1 VERB rest` lines: (ID, verb, rest) for every line whose verb is one of `verbs`."""
     pattern = (r"^[\s>*_|-]*(?:\d+[.)]\s*)?\**([A-Z]\d+)\**[\s:.)\]-]+\**(" + "|".join(verbs) +
-               r")\b\**(?:[\s:—–-]+(.*))?$")
+               r")\b\**(?:[\s,;:—–-]+(.*))?$")
     return [(m[1], m[2], (m[3] or "").strip()) for m in re.finditer(pattern, body or "", re.M)]
 
 
