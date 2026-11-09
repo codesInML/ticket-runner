@@ -154,7 +154,7 @@ class ClaudeBackendTests(base.RunnerTests):
             self.assertEqual(call[call.index('--setting-sources') + 1], 'user')
             self.assertNotIn('--append-system-prompt-file', call)  # no CLAUDE.md in this project
         self.assertEqual([(self.model(c), c[c.index('--effort') + 1]) for c in calls],
-                         [('claude-sonnet-5-5', 'medium')] * 2 + [('claude-opus-5-5', 'medium'), ('claude-haiku-5-5', 'low')])
+                         [('claude-haiku-5-5', 'high')] * 2 + [('claude-opus-5-5', 'high'), ('claude-haiku-5-5', 'high')])
         self.assertIn('Use only your own tools and sub-agents', self.prompt(calls[0]))
         self.assertNotIn('Use only CommandCode', self.prompt(calls[2]))
         for env in self.envs():
@@ -186,7 +186,7 @@ class ClaudeBackendTests(base.RunnerTests):
                                              'cacheCreationInputTokens': 40})
         self.assertEqual(set(costs[1]['usage'].values()), {0})  # a resume's totals repeat what was counted
         self.assertEqual((costs[0]['model'], costs[0]['effort'], costs[0]['numTurns'], costs[0]['durationMs']),
-                         ('claude-sonnet-5-5', 'medium', 3, 61000))
+                         ('claude-haiku-5-5', 'high', 3, 61000))
         self.assertRegex(result.stdout, r'Ticket graph: .* · [\d,]+ tokens spent')
         self.assertIn('Usage of epic #207 so far: 480 tokens', result.stdout)
         self.assertNotIn('$', result.stdout)
@@ -312,15 +312,15 @@ class ClaudeBackendTests(base.RunnerTests):
         result = self.run_claude('--dry-run', '--workflow', 'osmani', '--skip-plan-check')
         self.assertEqual(result.returncode, 0, result.stderr)
         for line in ('Backend: claude, your claude.ai subscription',
-                     'implement     claude-sonnet-5-5 @ medium, 500 turns',
-                     'ticket review claude-sonnet-5-5 @ high, 500 turns',
-                     'epic review   claude-opus-5-5 @ medium, 500 turns',
-                     'verify        claude-sonnet-5-5 @ medium, 500 turns',
-                     'launch plan   claude-haiku-5-5 @ low, 500 turns',
-                     'escalate      claude-opus-5-5 @ medium, 500 turns',
+                     'implement     claude-haiku-5-5 @ high, 500 turns',
+                     'ticket review claude-sonnet-5-5 @ medium, 500 turns',
+                     'epic review   claude-opus-5-5 @ high, 500 turns',
+                     'verify        claude-haiku-5-5 @ high, 500 turns',
+                     'launch plan   claude-haiku-5-5 @ high, 500 turns',
+                     'escalate      claude-sonnet-5-5 @ medium, 500 turns',
                      'epic review  claude-opus-5-5, self-checked'):
             self.assertIn(line, result.stdout)
-        self.assertIn('ticket review shares claude-sonnet-5-5 with the implementer', result.stderr)
+        self.assertNotIn('ticket review shares', result.stderr)  # Sonnet reviews what Haiku implements
         self.assertNotIn('$', result.stdout)
         result = self.run_claude('--dry-run', '--launch-plan-model', 'sonnet')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -396,12 +396,12 @@ class ClaudeBackendTests(base.RunnerTests):
         self.assertEqual(self.state()['_meta']['workflow'], 'osmani')
         self.assertEqual(self.model(self.call('epic review')), 'claude-opus-5-5')
 
-    def test_osmani_ticket_review_runs_on_sonnet_at_high(self):
+    def test_osmani_ticket_review_runs_on_sonnet_at_medium(self):
         self.plan_osmani()
         result = self.run_claude('--workflow', 'osmani')
         self.assertEqual(result.returncode, 0, result.stderr)
         review = self.call('ticket review')
-        self.assertEqual((self.model(review), review[review.index('--effort') + 1]), ('claude-sonnet-5-5', 'high'))
+        self.assertEqual((self.model(review), review[review.index('--effort') + 1]), ('claude-sonnet-5-5', 'medium'))
         self.assertIn('✓ #209 ticket review · 120 tokens', result.stdout)
 
     def test_browser_verifier_gets_the_devtools_server_inline(self):
@@ -413,7 +413,7 @@ class ClaudeBackendTests(base.RunnerTests):
         self.assertEqual(config['mcpServers']['chrome-devtools']['args'],
                          ['-y', 'chrome-devtools-mcp@latest', '--isolated'])
         self.assertIn('mcp__chrome-devtools__navigate_page', verifier[verifier.index('--allowedTools') + 1])
-        self.assertEqual((self.model(verifier), verifier[verifier.index('--effort') + 1]), ('claude-sonnet-5-5', 'medium'))
+        self.assertEqual((self.model(verifier), verifier[verifier.index('--effort') + 1]), ('claude-haiku-5-5', 'high'))
         self.assertNotIn('--mcp-config', self.calls()[0])
         self.assertIn('--strict-mcp-config', verifier)
 

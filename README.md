@@ -71,7 +71,7 @@ it is being removed. A label that exists keeps its own colour and description.
 A ticket is stuck when its implementer ends NEEDS_HUMAN, BLOCKED or without a STATUS line, when its fix
 round does, or when its ticket review still blocks after the fix round. Before it goes to a person, the
 runner hands it once per kind (implement, review) to the escalation model (`--escalate-model`, env
-`ESCALATE_MODEL`, default `sol` @ medium on codex and `opus` @ medium on claude, `off` on commandcode). That
+`ESCALATE_MODEL`, default `sol` @ medium on codex and `sonnet` @ medium on claude, `off` on commandcode). That
 session runs in a fresh thread in the ticket's worktree with the earlier reports. It is told to fix the
 problem, run the checks itself, and stop only for a decision that belongs to a person. A review escalation
 is followed by one more review round with the same reviewer; a ticket still blocking after that needs a
@@ -162,12 +162,12 @@ every project depth and `.claude/` join the protected paths, since Claude Code r
 
 | Stage | Default model | Effort |
 | --- | --- | --- |
-| Implement, fix, integration repair, verify repair | `sonnet` | medium |
-| Ticket review (osmani) | `sonnet` | high |
-| Epic review, repair review | `opus` | medium |
-| Verify | `sonnet` | medium |
-| Launch plan | `haiku` | low |
-| Escalate (a stuck ticket) | `opus` | medium |
+| Implement, fix, integration repair, verify repair | `haiku` | high |
+| Ticket review (osmani) | `sonnet` | medium |
+| Epic review, repair review | `opus` | high |
+| Verify | `haiku` | high |
+| Launch plan | `haiku` | high |
+| Escalate (a stuck ticket) | `sonnet` | medium |
 
 Costs are tokens and time, with no dollar amount in state, the graph or the tables posted with
 `--post-costs`, and a resumed session's earlier usage is subtracted. A spent usage limit stops every ticket

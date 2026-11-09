@@ -85,9 +85,10 @@ EPIC_REVIEWERS = "deepseek,glm"
 COMMANDCODE_DEFAULTS = {"": ("flash", None), "ticket_review_": ("minimax,glm", "high"), "verify_": ("minimax", "high"),
                         "epic_review_": (EPIC_REVIEWERS, "high"), "launch_plan_": ("deepseek", "high"),
                         "escalate_": ("off", "high")}
-# Sonnet on every ticket, Opus saved for the epic review and stuck tickets: the limit here is the plan's usage.
-CLAUDE_DEFAULTS = {"": ("sonnet", "medium"), "ticket_review_": ("sonnet", "high"), "verify_": ("sonnet", "medium"),
-                   "epic_review_": ("opus", "medium"), "launch_plan_": ("haiku", "low"), "escalate_": ("opus", "medium")}
+# Haiku implements and verifies, Sonnet reviews tickets and takes stuck ones, Opus is saved for the epic review:
+# the limit here is the plan's usage.
+CLAUDE_DEFAULTS = {"": ("haiku", "high"), "ticket_review_": ("sonnet", "medium"), "verify_": ("haiku", "high"),
+                   "epic_review_": ("opus", "high"), "launch_plan_": ("haiku", "high"), "escalate_": ("sonnet", "medium")}
 CODEX_DEFAULTS = {"": ("luna", "high"), "ticket_review_": ("luna", "high"), "verify_": ("luna", "high"),
                   "epic_review_": ("sol", "high"), "launch_plan_": ("luna", "low"), "escalate_": ("sol", "medium")}
 BACKEND_DEFAULTS = {"commandcode": COMMANDCODE_DEFAULTS, "claude": CLAUDE_DEFAULTS, "codex": CODEX_DEFAULTS}

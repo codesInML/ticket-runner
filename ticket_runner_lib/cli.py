@@ -239,7 +239,7 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, WORKFLOW, IMPL
     p.add_argument("--ticket-review-max-turns", type=positive, default=os.getenv("TICKET_REVIEW_MAX_TURNS", "500"))
     p.add_argument("--skip-plan-check", action="store_true", help="run an osmani epic despite plan check refusals")
     p.add_argument("--verify-model", default=os.getenv("VERIFY_MODEL"),
-                   help="model of the verify stage's read-only verifier (default minimax; sonnet on claude)")
+                   help="model of the verify stage's read-only verifier (default minimax; haiku on claude)")
     p.add_argument("--verify-effort", default=os.getenv("VERIFY_EFFORT"))
     p.add_argument("--verify-max-turns", type=positive, default=os.getenv("VERIFY_MAX_TURNS", "500"))
     p.add_argument("--no-verify", action="store_true", help="skip the verify stage")
@@ -255,7 +255,7 @@ Env: BACKEND, COMMANDCODE_BIN, CLAUDE_BIN, CODEX_BIN, CODEX_HOME, WORKFLOW, IMPL
     p.add_argument("--launch-plan-max-turns", type=positive, default=os.getenv("LAUNCH_PLAN_MAX_TURNS", "500"))
     p.add_argument("--escalate-model", default=os.getenv("ESCALATE_MODEL"),
                    help="model that takes over a stuck ticket before it needs a human, or 'off' (default sol on "
-                   "codex, opus on claude, off on commandcode)")
+                   "codex, sonnet on claude, off on commandcode)")
     p.add_argument("--escalate-effort", default=os.getenv("ESCALATE_EFFORT"))
     p.add_argument("--escalate-max-turns", type=positive, default=os.getenv("ESCALATE_MAX_TURNS", "500"))
     p.add_argument("--branch", help="the epic branch tickets merge into, whatever is checked out; required on an "
